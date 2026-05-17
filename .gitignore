@@ -1,8 +1,38 @@
-.terraform/
+# Terraform
+**/.terraform/
+**/.terraform.lock.hcl
 *.tfstate
-*.tfstate.backup
-.env
-.env.local
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfplan
 *.tfvars
 !*.tfvars.example
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Ansible
+*.retry
+ansible/.vault_pass
+
+# Secrets / credenciales
+.env
+!.env.example
+*.pem
+*.key
+!ansible/roles/*/files/*.pub
+
+# IDEs
+.vscode/
+.idea/
+*.swp
 .DS_Store
+
+# Python (ansible-lint cache)
+__pycache__/
+*.pyc
+.venv/
