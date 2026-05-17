@@ -1,34 +1,17 @@
 services:
-  postgres:
-    image: postgres:15.4
-    container_name: dkron-postgres
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
-    ports:
-      - "5432:5432"
-    volumes:
-      - pg_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
-      interval: 5s
-      retries: 5
-
   dkron:
-    image: dkron/dkron:v3.2.7
+    image: dkron/dkron:4.0.9
     container_name: dkron-server
-    depends_on:
-      postgres:
-        condition: service_healthy
     command:
       - agent
       - --server
       - --bootstrap-expect=1
       - --node-name=dkron-server
-      - --store=postgres
-      - --dsn=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      - --data-dir=/dkron.data
+      - --enable-prometheus
       - --log-level=info
+    volumes:
+      - dkron_data:/dkron.data
     ports:
       - "8080:8080"
       - "8946:8946"
@@ -75,6 +58,6 @@ services:
       - "3000:3000"
 
 volumes:
-  pg_data:
   prom_data:
   grafana_data:
+  dkron_data:

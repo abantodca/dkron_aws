@@ -1511,9 +1511,15 @@ Ambos leen el state "antes", calculan cambios, aplican, y el último que escribe
 
 ### 🖱️ Equivalente en AWS Console (lo que harías click-a-click)
 
-| Recurso | Servicio | Que harías en consola |
-|---|---|---|
-| Bucket S3 del state | 🪣 S3 | **S3 → Create bucket** → Name: `tfstate-dkron-tunombre-2026` → Region: `us-east-1` → Block all public access: **ON** → Bucket Versioning: **Enable** → Default encryption: **SSE-S3 (AES-256)** → Create. |
+> El `bootstrap.sh` ejecuta **5 pasos** sobre el mismo bucket. Aquí los desglosamos 1:1 para que puedas reproducirlos a mano en la consola y comprobar **exactamente** lo que hace el script.
+
+| Paso del script | Recurso | Servicio | Que harías en consola |
+|---|---|---|---|
+| 1) `create-bucket` | Bucket S3 | 🪣 S3 | **S3 → Buckets → Create bucket** → AWS Region: `us-east-1` → Bucket name: `tfstate-dkron-tunombre-2026` → Object Ownership: ACLs disabled → Create bucket. |
+| 2) `put-bucket-versioning` | Versioning del bucket | 🪣 S3 | El bucket → pestaña **Properties → Bucket Versioning → Edit → Enable → Save changes**. |
+| 3) `put-bucket-encryption` | Default encryption | 🪣 S3 | El bucket → **Properties → Default encryption → Edit** → Encryption type: **Server-side encryption with Amazon S3 managed keys (SSE-S3 / AES-256)** → Bucket Key: Enable → Save changes. |
+| 4) `put-public-access-block` | Block public access | 🪣 S3 | El bucket → **Permissions → Block public access (bucket settings) → Edit** → marca **las 4 opciones**: BlockPublicAcls, IgnorePublicAcls, BlockPublicPolicy, RestrictPublicBuckets → Save changes → escribe `confirm`. |
+| 5) `put-bucket-tagging` | Tags del bucket | 🪣 S3 | El bucket → **Properties → Tags → Add new tag** (4 veces) → `Project=dkron`, `Environment=prod`, `Owner=tunombre`, `ManagedBy=bootstrap.sh` → Save changes. |
 
 > 🧠 **Concepto:** este bucket es **el huevo del que sale Terraform**. No lo gestionamos con Terraform (paradoja "gallina y huevo"), por eso lo creamos antes con un script `bootstrap.sh`. Tampoco lo elimina `terraform destroy` — lo documentamos en el runbook (Parte 10).
 
@@ -1943,7 +1949,7 @@ Vas a crear **6 archivos** en `infra/envs/prod/`, cada uno con una responsabilid
 # sea idéntico al "funciona en GitHub Actions".
 
 terraform {
-  required_version = ">= 1.6"
+  required_version = ">= 1.10"   # 1.10+ requerido por backend S3 con use_lockfile = true
 
   required_providers {
     aws = {
@@ -2345,8 +2351,9 @@ aws ec2 describe-vpcs --filters "Name=tag:Project,Values=dkron" \
 
 | Recurso Terraform | Servicio | Que harías click-a-click |
 |---|---|---|
-| `aws_ecr_repository.dkron` | 📦 ECR | **ECR → Private repositories → Create repository** → Name: `dkron-dkron` → Tag immutability: **Mutable** → Scan on push: **Enable** → Encryption: AES-256. |
-| `aws_ecr_lifecycle_policy` | 📦 ECR | Tras crear: pestaña **Lifecycle Policy → Edit → Save**. Regla: "Keep last 5 untagged images, expire rest". |
+| `aws_ecr_repository.this` | 📦 ECR | **ECR → Private registry → Repositories → Create repository** → Visibility: Private → Repository name: `dkron-dkron` → Tag immutability: **Mutable** → Scan on push: **Enable** → Encryption settings: **AES-256** (AWS-owned key) → Create. |
+| `aws_ecr_lifecycle_policy.this` | 📦 ECR | El repo creado → pestaña **Lifecycle Policy → Create rule** dos veces:<br>• **Rule priority 1** — Description: "Mantener últimas 5 imágenes con tag" → Image status: **Tagged**, tag pattern: `*` → Match criteria: **Image count more than 5** → Action: Expire.<br>• **Rule priority 2** — Description: "Borrar imágenes sin tag tras 1 día" → Image status: **Untagged** → Match criteria: **Since image pushed > 1 day** → Action: Expire. |
+| `aws_ssm_parameter.image_repo` | 🔐 SSM | **Systems Manager → Parameter Store → Create parameter** → Name: `/dkron/prod/image_repo` → Tier: Standard → Type: **String** → Value: la URI del repo ECR recién creado (`<accountid>.dkr.ecr.us-east-1.amazonaws.com/dkron-dkron`) → Tags: `Name=dkron-image-repo` → Create. Ansible lo lee en runtime para saber qué imagen pull. |
 
 ### 📋 `infra/modules/ecr/variables.tf` (copy-paste)
 
@@ -2477,11 +2484,15 @@ docker push "$ECR_URL:v3.2.7"
 
 | Recurso Terraform | Servicio | Que harías click-a-click |
 |---|---|---|
-| `aws_db_subnet_group.this` | 🗄️ RDS | **RDS → Subnet groups → Create DB subnet group** → Name: `dkron-db-subnets` → VPC: dkron-vpc → AZ: us-east-1a, us-east-1b → Subnets: las dos privadas (10.20.10.0/24, 10.20.11.0/24). |
-| `aws_security_group.db` | 🌐 VPC | **VPC → Security groups → Create** → Name: `dkron-db-sg` → VPC: dkron-vpc → Inbound: type Postgres (5432), Source: el SG `dkron-app-sg`. |
-| `aws_db_instance.dkron` | 🗄️ RDS | **RDS → Databases → Create database** → Engine: PostgreSQL 15.7 → Template: Free tier → DB instance: `dkron-prod` → Instance class: `db.t3.micro` → Storage: 20 GB gp3 → Connectivity: dkron-vpc, no public access, subnet group: dkron-db-subnets, VPC SG: dkron-db-sg → Multi-AZ: **No** → Storage encryption: **Yes**. |
-| `aws_s3_bucket.outputs` (opcional) | 🪣 S3 | **S3 → Create bucket** → Name: `dkron-outputs-tunombre-2026` → Block all public access: **ON** → Bucket Versioning: Enable → Encryption: SSE-S3. |
-| `aws_ssm_parameter.dsn` | 🔐 SSM | **Systems Manager → Parameter Store → Create parameter** → Name: `/dkron/prod/dsn` → Type: **SecureString** → Value: `postgres://user:pass@host:5432/db?sslmode=require`. |
+| `aws_security_group.db` | 🌐 VPC | **VPC → Security groups → Create** → Name: `dkron-db-sg` → Description: "RDS Postgres — ingress 5432 lo añade compute" → VPC: dkron-vpc → **NO añadas ingress aquí** — la regla 5432 desde el SG-app la crea el módulo `compute` con un `aws_security_group_rule` aparte para romper el ciclo storage↔compute → Sin egress explícito (RDS no inicia conexiones salientes) → Create. |
+| `aws_db_subnet_group.this` | 🗄️ RDS | **RDS → Subnet groups → Create DB subnet group** → Name: `dkron-db-subnets` → VPC: dkron-vpc → Availability Zones: `us-east-1a`, `us-east-1b` → Subnets: las dos privadas (`10.20.10.0/24`, `10.20.11.0/24`). |
+| `aws_db_instance.dkron` | 🗄️ RDS | **RDS → Databases → Create database** → Standard create → Engine: **PostgreSQL 15.7** → Template: Free tier → DB instance ID: `dkron-prod` → Master username: `dkronadmin` → Master password: el de tu `terraform.tfvars` → DB instance class: `db.t3.micro` → Allocated storage: 20 GB → Storage type: **gp3** → **Storage encryption: Enable** → Connectivity: VPC `dkron-vpc`, Public access: **No**, Subnet group: `dkron-db-subnets`, VPC SG: `dkron-db-sg`, AZ: No preference → Database authentication: Password → Additional configuration: Initial database name: `dkron`, **Backup retention period: 0 days**, **Enable deletion protection: NO**, **Apply immediately: Yes**. Al borrar luego: marca **Skip final snapshot**. |
+| `aws_ssm_parameter.dsn` | 🔐 SSM | **Systems Manager → Parameter Store → Create parameter** → Name: `/dkron/prod/dsn` → Tier: Standard → Type: **SecureString** → KMS key: alias/aws/ssm → Value: `postgres://dkronadmin:<password>@<rds-endpoint>:5432/dkron?sslmode=require` (compón el string con el endpoint que devolvió RDS) → Tags: `Name=dkron-dsn` → Create. |
+| `aws_s3_bucket.outputs` (opcional, `var.enable_s3_outputs=true`) | 🪣 S3 | **S3 → Buckets → Create bucket** → Name: `dkron-outputs-tunombre-prod` → Region: us-east-1 → ACLs disabled → Create. |
+| `aws_s3_bucket_versioning.outputs` | 🪣 S3 | El bucket → **Properties → Bucket Versioning → Edit → Enable**. |
+| `aws_s3_bucket_server_side_encryption_configuration.outputs` | 🪣 S3 | El bucket → **Properties → Default encryption → Edit** → SSE-S3 (AES-256). |
+| `aws_s3_bucket_public_access_block.outputs` | 🪣 S3 | El bucket → **Permissions → Block public access → Edit** → marca **las 4 opciones**. |
+| `aws_s3_bucket_lifecycle_configuration.outputs` | 🪣 S3 | El bucket → **Management → Lifecycle rules → Create lifecycle rule** → Name: `archive-old-outputs` → Scope: aplica a todos los objetos → **Lifecycle rule actions:** Move to Glacier Instant Retrieval **after 30 days**, Expire **after 365 days** → Save. |
 
 ### 📋 `infra/modules/storage/variables.tf` (copy-paste)
 
@@ -2568,9 +2579,10 @@ resource "aws_ssm_parameter" "dsn" {
 
 # ───── S3 outputs (OPCIONAL — Caso D 9.6) ─────
 resource "aws_s3_bucket" "outputs" {
-  count  = var.enable_s3_outputs ? 1 : 0
-  bucket = "${var.project}-outputs-${var.owner}-${var.environment}"
-  tags   = { Name = "${var.project}-outputs" }
+  count         = var.enable_s3_outputs ? 1 : 0
+  bucket        = "${var.project}-outputs-${var.owner}-${var.environment}"
+  force_destroy = true   # permite `terraform destroy` aunque tenga objetos (alcance proyecto)
+  tags          = { Name = "${var.project}-outputs" }
 }
 
 resource "aws_s3_bucket_versioning" "outputs" {
@@ -2694,15 +2706,28 @@ aws ssm get-parameter --name /dkron/prod/dsn --with-decryption \
 
 | Recurso Terraform | Servicio | Que harías click-a-click |
 |---|---|---|
-| `aws_security_group.alb` | 🌐 VPC | **VPC → Security groups → Create** → Name: `dkron-alb-sg` → Inbound: HTTP 80 from `0.0.0.0/0`, HTTP 3000 from `0.0.0.0/0` → Outbound: all. |
-| `aws_security_group.app` | 🌐 VPC | **VPC → Security groups → Create** → Name: `dkron-app-sg` → Inbound: TCP 8080 from sg `dkron-alb-sg`, TCP 9100 (node_exporter) — se abre en monitoring → Outbound: all. |
-| `aws_key_pair.this` | 💻 EC2 | **EC2 → Network & Security → Key pairs → Import key pair** → Name: `dkron-key` → Pega tu `~/.ssh/id_ed25519.pub`. |
-| `aws_iam_role.ec2` + 3 policies + `aws_iam_instance_profile.ec2` | 🔐 IAM | **IAM → Roles → Create role** → Trusted entity: AWS service → Service: EC2 → Permissions: `AmazonSSMManagedInstanceCore` + `CloudWatchAgentServerPolicy` + policies inline para ECR pull y SSM:GetParameter del DSN. Crea automáticamente el instance profile. |
-| `aws_cloudwatch_log_group.{dkron,compose}` | 📊 CloudWatch | **CloudWatch → Log groups → Create log group** → `/dkron/ec2/dkron` y `/dkron/ec2/compose` → Retention: 1 day. |
-| `aws_instance.dkron` | 💻 EC2 | **EC2 → Instances → Launch instance** → Name: `dkron-host` → AMI: Amazon Linux 2023 → Type: t3.micro → Key pair: dkron-key → Network: dkron-vpc, subnet `dkron-private-0`, Auto-assign public IP: **Disable** → SG: dkron-app-sg → IAM instance profile: el de arriba → Storage: 20 GB gp3 encrypted → Advanced → User data: el script `set -e; dnf update; dnf install python3 awscli; systemctl enable --now amazon-ssm-agent`. |
-| `aws_lb.this` | ⚖️ EC2 | **EC2 → Load balancers → Create → Application Load Balancer** → Name: `dkron-alb` → Scheme: internet-facing → VPC: dkron-vpc → Mappings: 2 AZs con `dkron-public-0` y `dkron-public-1` → SG: `dkron-alb-sg`. |
-| `aws_lb_target_group.dkron` | ⚖️ EC2 | **EC2 → Target groups → Create** → Type: Instances → Name: `dkron-tg` → Protocol: HTTP, Port: 8080 → VPC: dkron-vpc → Health check path: `/v1/jobs`, healthy threshold: 2, unhealthy: 3, interval: 30 → Register target: la EC2 `dkron-host`. |
-| `aws_lb_listener.http` | ⚖️ EC2 | En el ALB → **Listeners → Add listener** → Protocol: HTTP, Port: 80 → Default action: Forward to `dkron-tg`. |
+| `aws_security_group.alb` | 🌐 VPC | **VPC → Security groups → Create** → Name: `dkron-alb-sg` → VPC: dkron-vpc → Inbound: HTTP 80 from `0.0.0.0/0`, HTTP 3000 from `0.0.0.0/0` → Outbound: all traffic → Create. |
+| `aws_security_group.app` | 🌐 VPC | **VPC → Security groups → Create** → Name: `dkron-app-sg` → VPC: dkron-vpc → Inbound: TCP 8080 from SG `dkron-alb-sg` (y SSH 22 desde `ssh_allowed_cidrs` solo si la lista NO está vacía — dynamic block). El puerto 9100 (node_exporter) lo abre `monitoring` con una regla aparte → Outbound: all traffic → Create. |
+| `aws_security_group_rule.db_from_app` | 🌐 VPC | Sobre el SG **`dkron-db-sg`** (creado en 5.4) → **Edit inbound rules → Add rule** → Type: Custom TCP, Port: **5432**, Source: SG `dkron-app-sg`, Description: "Postgres desde app" → Save. Esta regla vive en `compute` (no en `storage`) para romper el ciclo storage↔compute. |
+| `aws_key_pair.this` | 💻 EC2 | **EC2 → Network & Security → Key pairs → Actions → Import key pair** → Name: `dkron-key` → Pega tu `~/.ssh/id_ed25519.pub` → Import key pair. |
+| `data.aws_ssm_parameter.al2023` | 🔐 SSM | **No es creación** — Terraform solo lee el parámetro público `/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64` para obtener el AMI ID actual. En consola lo verás al elegir "Amazon Linux 2023 AMI" en el wizard de EC2. |
+| `aws_iam_role.ec2` | 🔐 IAM | **IAM → Roles → Create role** → Trusted entity type: AWS service → Use case: **EC2** → Next (sin marcar policies aún) → Role name: `dkron-ec2-role` → Create role. |
+| `aws_iam_role_policy.ec2_ecr` (inline) | 🔐 IAM | En el rol `dkron-ec2-role` → **Add permissions → Create inline policy → JSON** → permite `ecr:GetAuthorizationToken` sobre `*` y `ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer`, `ecr:BatchCheckLayerAvailability` sobre el ARN del repo `dkron-dkron`. |
+| `aws_iam_role_policy.ec2_ssm_dsn` (inline) | 🔐 IAM | Mismo rol → **Add permissions → Create inline policy → JSON** → `ssm:GetParameter`, `ssm:GetParameters`, `kms:Decrypt` sobre los ARN de `/dkron/prod/dsn` (SecureString) y `/dkron/prod/image_repo`. |
+| `aws_iam_role_policy.ec2_s3_outputs` (inline, opcional) | 🔐 IAM | Solo si `enable_s3_outputs=true`: mismo rol → **Create inline policy → JSON** → `s3:PutObject`, `s3:GetObject` sobre `arn:aws:s3:::dkron-outputs-tunombre-prod/*`. |
+| `aws_s3_bucket.ansible_ssm` + `aws_s3_bucket_public_access_block.ansible_ssm` | 🪣 S3 | **S3 → Create bucket** → Name: `dkron-ansible-ssm-<accountid>` (el plugin `community.aws.aws_ssm` lo usa para transferir archivos a la EC2) → Block all public access: ON → Create. Anota el nombre. |
+| `aws_iam_role_policy.ec2_ansible_ssm` (inline) | 🔐 IAM | Mismo rol `dkron-ec2-role` → **Create inline policy → JSON** → `s3:GetObject/PutObject/DeleteObject` sobre `arn:aws:s3:::dkron-ansible-ssm-<accountid>/*` + `s3:ListBucket/GetBucketLocation` sobre el bucket. |
+| `aws_ssm_parameter.ansible_ssm_bucket` | 🔐 SSM | **Systems Manager → Parameter Store → Create parameter** → Name: `/dkron/prod/ansible_ssm_bucket` → Type: String → Value: `dkron-ansible-ssm-<accountid>` (el inventory Ansible lo lee en runtime). |
+| `aws_iam_role_policy_attachment.ec2_cw` | 🔐 IAM | Mismo rol → **Add permissions → Attach policies** → busca `CloudWatchAgentServerPolicy` (AWS managed) → Attach. |
+| `aws_iam_role_policy_attachment.ec2_ssm_managed` | 🔐 IAM | Mismo rol → **Attach policies** → busca `AmazonSSMManagedInstanceCore` (AWS managed) → Attach. |
+| `aws_iam_instance_profile.ec2` | 🔐 IAM | Cuando creas el rol con caso de uso **EC2** desde la UI, AWS crea automáticamente el instance profile con el mismo nombre. Si usaste AWS CLI: `aws iam create-instance-profile --instance-profile-name dkron-ec2-profile && aws iam add-role-to-instance-profile --instance-profile-name dkron-ec2-profile --role-name dkron-ec2-role`. |
+| `aws_cloudwatch_log_group.dkron` | 📊 CloudWatch | **CloudWatch → Log groups → Create log group** → Name: `/dkron/ec2/dkron` → Retention: **1 day** → Create. |
+| `aws_cloudwatch_log_group.compose` | 📊 CloudWatch | Mismo wizard → Name: `/dkron/ec2/compose` → Retention: **1 day**. |
+| `aws_instance.dkron` | 💻 EC2 | **EC2 → Instances → Launch instance** → Name: `dkron-host`, Tag adicional `Role=dkron-server` → AMI: Amazon Linux 2023 → Instance type: t3.micro → Key pair: `dkron-key` → Network settings: VPC `dkron-vpc`, Subnet `dkron-private-0`, **Auto-assign public IP: Disable**, SG: `dkron-app-sg` → Configure storage: 20 GB, **gp3**, **Encrypted: Yes**, **Delete on termination: Yes** → Advanced details: IAM instance profile: `dkron-ec2-profile`, **Detailed monitoring: Enable**, User data: `#!/bin/bash`<br>`set -e`<br>`dnf -y update`<br>`dnf -y install python3 awscli`<br>`systemctl enable --now amazon-ssm-agent`. |
+| `aws_lb.this` | ⚖️ EC2 | **EC2 → Load balancers → Create load balancer → Application Load Balancer** → Name: `dkron-alb` → Scheme: **internet-facing** → IP address type: IPv4 → VPC: dkron-vpc → Mappings: 2 AZs con `dkron-public-0` y `dkron-public-1` → SG: `dkron-alb-sg`. |
+| `aws_lb_target_group.dkron` | ⚖️ EC2 | **EC2 → Target groups → Create target group** → Target type: **Instances** → Name: `dkron-tg` → Protocol: HTTP, Port: **8080** → VPC: dkron-vpc → Protocol version: HTTP1 → Health checks: Path `/v1/jobs`, Healthy threshold: 2, Unhealthy threshold: 3, Interval: 30s, **Success codes: 200**. |
+| `aws_lb_target_group_attachment.dkron` | ⚖️ EC2 | En el paso **Register targets** del wizard del target group → selecciona la EC2 `dkron-host` → Port: **8080** → Include as pending below → Create target group. |
+| `aws_lb_listener.http` | ⚖️ EC2 | En el ALB `dkron-alb` → pestaña **Listeners → Add listener** → Protocol: HTTP, Port: **80** → Default action: **Forward to target group → `dkron-tg`** → Add. |
 
 ### 📋 `infra/modules/compute/variables.tf` (copy-paste)
 
@@ -2906,6 +2931,53 @@ resource "aws_iam_role_policy" "ec2_s3_outputs" {
   })
 }
 
+# Bucket auxiliar para el plugin community.aws.aws_ssm (transferencia de archivos
+# Ansible → EC2 vía SSM). NO confundir con el bucket de outputs de jobs.
+data "aws_caller_identity" "current" {}
+
+resource "aws_s3_bucket" "ansible_ssm" {
+  bucket        = "${var.project}-ansible-ssm-${data.aws_caller_identity.current.account_id}"
+  force_destroy = true
+  tags          = { Name = "${var.project}-ansible-ssm" }
+}
+
+resource "aws_s3_bucket_public_access_block" "ansible_ssm" {
+  bucket                  = aws_s3_bucket.ansible_ssm.id
+  block_public_acls       = true
+  ignore_public_acls      = true
+  block_public_policy     = true
+  restrict_public_buckets = true
+}
+
+# La EC2 lee/escribe en el bucket ansible-ssm (el plugin sube payloads transitorios)
+resource "aws_iam_role_policy" "ec2_ansible_ssm" {
+  role = aws_iam_role.ec2.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+        Resource = "${aws_s3_bucket.ansible_ssm.arn}/*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket", "s3:GetBucketLocation"]
+        Resource = aws_s3_bucket.ansible_ssm.arn
+      }
+    ]
+  })
+}
+
+# Publica el nombre del bucket en SSM para que el inventario aws_ec2.yml lo resuelva
+# en runtime (mismo patrón que /dkron/prod/dsn y /dkron/prod/image_repo).
+resource "aws_ssm_parameter" "ansible_ssm_bucket" {
+  name  = "/${var.project}/${var.environment}/ansible_ssm_bucket"
+  type  = "String"
+  value = aws_s3_bucket.ansible_ssm.id
+  tags  = { Name = "${var.project}-ansible-ssm-bucket" }
+}
+
 # CloudWatch Logs agent
 resource "aws_iam_role_policy_attachment" "ec2_cw" {
   role       = aws_iam_role.ec2.name
@@ -3030,6 +3102,7 @@ output "alb_sg_id"           { value = aws_security_group.alb.id }
 output "log_group_dkron"     { value = aws_cloudwatch_log_group.dkron.name }
 output "log_group_compose"   { value = aws_cloudwatch_log_group.compose.name }
 output "ec2_role_name"       { value = aws_iam_role.ec2.name }
+output "ansible_ssm_bucket"  { value = aws_s3_bucket.ansible_ssm.id }
 ```
 
 ### 🧭 Cómo accede Ansible a una EC2 en SUBNET PRIVADA
@@ -3431,25 +3504,11 @@ compose:
   ansible_host: instance_id              # ← clave: usamos instance-id como "host"
   ansible_connection: aws_ssm             # ← conexión via SSM, sin SSH público
   ansible_aws_ssm_region: us-east-1
-  ansible_aws_ssm_bucket_name: dkron-ansible-ssm-{{ aws_account_id | default('REPLACEME') }}
+  ansible_aws_ssm_bucket_name: "{{ lookup('amazon.aws.aws_ssm', '/dkron/prod/ansible_ssm_bucket', region='us-east-1') }}"
   ansible_python_interpreter: /usr/bin/python3
 ```
 
-> 🪣 **Bucket `ansible-ssm`**: el plugin `aws_ssm` usa un bucket S3 para transferir archivos a la EC2 (porque SSM Session Manager por sí solo no es un canal de archivos completo). Créalo en Terraform como otro recurso del módulo `compute/`:
-> ```hcl
-> resource "aws_s3_bucket" "ansible_ssm" {
->   bucket        = "${var.name}-ansible-ssm-${data.aws_caller_identity.current.account_id}"
->   force_destroy = true
-> }
-> resource "aws_s3_bucket_public_access_block" "ansible_ssm" {
->   bucket = aws_s3_bucket.ansible_ssm.id
->   block_public_acls = true
->   block_public_policy = true
->   ignore_public_acls = true
->   restrict_public_buckets = true
-> }
-> ```
-> Y añade al instance profile permisos de `s3:GetObject/PutObject/DeleteObject` sobre ese bucket. Documenta esta ampliación de permisos en el reporte sección B.5.
+> 🪣 **Bucket `ansible-ssm`**: el plugin `aws_ssm` usa un bucket S3 para transferir archivos a la EC2 (porque SSM Session Manager por sí solo no es un canal de archivos completo). Lo crea el módulo `compute/` (sección 5.5) — ya está incluido en los snippets de `compute/main.tf` que copiaste antes de llegar aquí; Terraform escribe su nombre al SSM parameter `/dkron/prod/ansible_ssm_bucket` y el inventory lo resuelve en runtime (mismo patrón que `db_dsn` y `ecr_repo`).
 
 **Variables del grupo `all`** — `ansible/inventories/prod/group_vars/all.yml`:
 ```yaml
@@ -3463,7 +3522,7 @@ dkron_image_tag: "v3.2.7"
 node_exporter_image_tag: "v1.8.2"
 
 # Lookups a SSM (Ansible los resuelve EN TIEMPO DE EJECUCIÓN, no se versionan)
-db_dsn: "{{ lookup('amazon.aws.aws_ssm', '/dkron/prod/dsn', region=region, decrypt=True) }}"
+db_dsn:  "{{ lookup('amazon.aws.aws_ssm', '/dkron/prod/dsn', region=region, decrypt=True) }}"
 ecr_repo: "{{ lookup('amazon.aws.aws_ssm', '/dkron/prod/image_repo', region=region) }}"
 
 # Endpoint del CloudWatch agent
@@ -3532,18 +3591,17 @@ docker_compose_plugin_version: "v2.29.7"
       - "PyYAML"
     state: present
 
-- name: Login en ECR (token efímero, válido 12h)
-  community.aws.ecs_ecr:
-    name: "_login"
-    region: "{{ region }}"
+- name: Obtener token efímero de ECR (válido 12h)
+  ansible.builtin.command:
+    cmd: "aws ecr get-login-password --region {{ region }}"
   register: ecr_token
   changed_when: false
+  no_log: true
   tags: [deploy]
 
 - name: docker login al ECR
-  ansible.builtin.command:
-    cmd: "docker login --username AWS --password-stdin {{ ecr_repo | regex_replace('/.*$', '') }}"
-    stdin: "{{ ecr_token.password }}"
+  ansible.builtin.shell:
+    cmd: "echo '{{ ecr_token.stdout }}' | docker login --username AWS --password-stdin {{ ecr_repo | regex_replace('/.*$', '') }}"
   changed_when: false
   no_log: true
   tags: [deploy]
@@ -3931,10 +3989,13 @@ Usa **OIDC** (OpenID Connect): GitHub se autentica contra AWS asumiendo un rol I
 
 ### 🖱️ Equivalente en AWS Console
 
-| Recurso | Servicio | Que harías click-a-click |
-|---|---|---|
-| OIDC Provider | 🔐 IAM | **IAM → Identity providers → Add provider** → Provider type: OpenID Connect → URL: `https://token.actions.githubusercontent.com` → Audience: `sts.amazonaws.com` → Add provider. |
-| Rol GHA | 🔐 IAM | **IAM → Roles → Create role** → Trusted entity: Web identity → Identity provider: `token.actions.githubusercontent.com` → Audience: `sts.amazonaws.com` → GitHub organization: `tunombre`, GitHub repository: `dkron-aws` → Permissions: PowerUserAccess + policy inline `iam:*` (la justificas en el reporte B.5). |
+| Paso del script | Recurso | Servicio | Que harías click-a-click |
+|---|---|---|---|
+| 1) `create-open-id-connect-provider` | OIDC Provider | 🔐 IAM | **IAM → Identity providers → Add provider** → Provider type: **OpenID Connect** → Provider URL: `https://token.actions.githubusercontent.com` → Audience: `sts.amazonaws.com` → Thumbprint: `6938fd4d98bab03faadb97b34396831e3780aea1` (lo calcula AWS automáticamente al pulsar "Get thumbprint") → Add provider. |
+| 2)+3) `create-role` con trust policy | Rol GHA | 🔐 IAM | **IAM → Roles → Create role** → Trusted entity type: **Web identity** → Identity provider: `token.actions.githubusercontent.com` → Audience: `sts.amazonaws.com` → GitHub organization: `tunombre`, GitHub repository: `dkron-aws` (la consola compone el `sub` `repo:tunombre/dkron-aws:*` automáticamente) → Role name: `github-actions-dkron` → Description: "Rol asumible por GitHub Actions vía OIDC para CI/CD" → Create role. |
+| 4) `attach-role-policy` | PowerUserAccess managed | 🔐 IAM | El rol → **Permissions → Add permissions → Attach policies** → busca y marca **`PowerUserAccess`** (AWS managed) → Attach. |
+| 5) `put-role-policy` | Policy inline `TerraformIAMManage` | 🔐 IAM | El rol → **Add permissions → Create inline policy → JSON** → Allow `iam:*` sobre `*` → Policy name: `TerraformIAMManage` → Create policy. PowerUser excluye `iam:*`, pero Terraform crea roles (instance profile EC2, etc.) — la justificación va en REPORTE.md B.5. |
+| 6) `tag-role` | Tags del rol | 🔐 IAM | El rol → pestaña **Tags → Manage tags → Add tag** (3 veces): `Project=dkron`, `Environment=prod`, `ManagedBy=bootstrap-oidc.sh` → Save. |
 
 ### 📋 Script copy-paste: `infra/bootstrap-oidc.sh`
 
@@ -4190,7 +4251,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3
-        with: { terraform_version: 1.7.5 }
+        with: { terraform_version: 1.10.5 }
       - name: fmt
         run: terraform fmt -check -recursive
         working-directory: infra/envs/prod
@@ -4215,9 +4276,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - name: Install ansible-lint and yamllint
+      # Creds AWS: el inventory aws_ec2.yml usa plugin amazon.aws.aws_ec2 + lookups SSM
+      # que necesitan credenciales incluso para --syntax-check (Ansible evalúa el
+      # inventory antes de parsear los playbooks).
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+      - name: Install ansible-lint, yamllint y boto3 (lookups AWS)
         run: |
-          pip install "ansible-core==2.17.*" "ansible-lint==24.7.*" "yamllint==1.35.*"
+          pip install "ansible-core==2.17.*" "ansible-lint==24.7.*" "yamllint==1.35.*" "boto3>=1.34" "botocore>=1.34"
           ansible-galaxy collection install -r ansible/requirements.yml
       - name: yamllint
         run: yamllint ansible/
@@ -4275,7 +4343,7 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: us-east-1
       - uses: hashicorp/setup-terraform@v3
-        with: { terraform_version: 1.7.5 }
+        with: { terraform_version: 1.10.5 }
       - run: terraform init
         working-directory: infra/envs/prod
       - run: terraform plan -no-color
@@ -4303,7 +4371,7 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: us-east-1
       - uses: hashicorp/setup-terraform@v3
-        with: { terraform_version: 1.7.5 }
+        with: { terraform_version: 1.10.5 }
       - run: terraform init
         working-directory: infra/envs/prod
       - id: tf
@@ -4369,7 +4437,7 @@ jobs:
           exit 1
 ```
 
-> Secrets necesarios en GitHub: `AWS_ROLE_ARN`, `ECR_REPO`, `DB_PASSWORD`, `SSH_PUBLIC_KEY`.
+> Secrets necesarios en GitHub (los **7**): `AWS_ROLE_ARN`, `ECR_REPO`, `TF_OWNER`, `DB_PASSWORD`, `SSH_PUBLIC_KEY`, `ALERT_EMAIL`, `GRAFANA_ADMIN_PASSWORD`. Si te falta cualquiera, `terraform plan` revienta con `No value for required variable`.
 
 ## ❓ 7.4 El workflow de destrucción: `.github/workflows/destruir.yaml`
 
@@ -4398,7 +4466,7 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: us-east-1
       - uses: hashicorp/setup-terraform@v3
-        with: { terraform_version: 1.7.5 }
+        with: { terraform_version: 1.10.5 }
       - run: terraform init
         working-directory: infra/envs/prod
       - run: terraform destroy -auto-approve
@@ -4646,27 +4714,41 @@ Vamos a crear **dos servicios ECS adicionales** en la misma VPC privada, con **E
 
 | Recurso Terraform | Servicio | Que harías click-a-click |
 |---|---|---|
-| `aws_efs_file_system.obs` | 🗂️ EFS | **EFS → Create file system** → Name: `dkron-obs` → VPC: dkron-vpc → Encryption: Enabled. |
-| `aws_efs_mount_target.obs` (×2) | 🗂️ EFS | Tras crear el FS: pestaña **Network → Manage** → Add mount target por cada subnet privada → Security group: `dkron-efs-sg`. |
-| `aws_efs_access_point.prometheus` y `.grafana` | 🗂️ EFS | **EFS → Access points → Create access point** → Path: `/prometheus` (uid/gid 65534) y `/grafana` (uid/gid 472). |
-| `aws_security_group.efs` | 🌐 VPC | **VPC → Security groups → Create** → Name: `dkron-efs-sg` → Inbound: NFS 2049 from sg del task. |
-| `aws_ssm_parameter.prometheus_config`, `.rules`, `.alertmanager_config` | 🔐 SSM | **Systems Manager → Parameter Store → Create parameter** → Names: `/dkron/prod/prometheus/{prometheus.yml,rules.yml,alertmanager.yml}` → Type: String → Value: el YAML correspondiente. |
-| `aws_ssm_parameter.dkron_targets` y `.node_targets` | 🔐 SSM | Igual que arriba → Names: `/dkron/prod/prometheus/targets/{dkron,node}.json` → JSON con la IP privada de la EC2. |
-| `aws_ecs_cluster.obs` | 🐳 ECS | **ECS → Clusters → Create cluster** → Name: `dkron-obs` → Infrastructure: AWS Fargate (serverless). |
-| `aws_iam_role.exec` + policies | 🔐 IAM | **IAM → Roles → Create role** → Trusted entity: AWS service → ECS Task → Permissions: `AmazonECSTaskExecutionRolePolicy` + inline para `ssm:GetParameter` y `kms:Decrypt`. |
-| `aws_iam_role.task` + policies | 🔐 IAM | Igual que exec, pero attached policy: lectura SSM de configs Prometheus + EFS read/write. |
-| `aws_cloudwatch_log_group.prometheus` y `.grafana` | 📊 CloudWatch | **Logs → Log groups → Create** → `/dkron/ecs/prometheus` y `/dkron/ecs/grafana` → Retention 1 day. |
-| `aws_security_group.prom_task` | 🌐 VPC | **VPC → SGs → Create** → Name: `dkron-prom-sg` → Outbound: all (necesita scrapear EC2 y llamar Lambda URL). |
-| `aws_security_group_rule` ingress 8080/9100 from prom_task to app_sg | 🌐 VPC | En `dkron-app-sg`: **Edit inbound rules → Add rule** → TCP 8080 from prom_task_sg, TCP 9100 from prom_task_sg. |
-| `aws_ecs_task_definition.prometheus` | 🐳 ECS | **ECS → Task definitions → Create** → Family: `dkron-prometheus` → Launch type: Fargate → 0.25 vCPU, 0.5 GB → Containers: `prometheus`, `alertmanager`, `config-init` (init container) → Volume EFS prometheus access point. |
-| `aws_ecs_service.prometheus` | 🐳 ECS | En el cluster: **Services → Create** → Task definition: `dkron-prometheus` → Desired count: 1 → Subnets: privadas → SG: prom_task_sg → Assign public IP: **OFF**. |
-| `aws_ecs_task_definition.grafana` | 🐳 ECS | **Task definitions → Create** → Family: `dkron-grafana` → 0.25 vCPU, 0.5 GB → Container `grafana:11.2.0` + EFS access point grafana. |
-| `aws_ecs_service.grafana` | 🐳 ECS | **Services → Create** → Target group: dkron-graf-tg → Container port: 3000. |
-| `aws_lb_target_group.grafana` + `aws_lb_listener_rule` | ⚖️ EC2 | **EC2 → Target groups → Create** → Type: IP → Name: `dkron-graf-tg` → Port 3000 → Health check `/api/health`. Luego en el ALB existente → **Listeners → :3000 → Add listener** → Forward to target group. |
-| `aws_sns_topic.alerts` | 📢 SNS | **SNS → Topics → Create topic** → Standard → Name: `dkron-alerts`. |
-| `aws_sns_topic_subscription.email` | 📢 SNS | En el topic → **Create subscription** → Protocol: Email → Endpoint: tu correo. Tras crear: confirma desde tu inbox. |
-| `aws_lambda_function.alertmgr_to_sns` | λ Lambda | **Lambda → Create function** → Author from scratch → Name: `dkron-alertmgr-to-sns` → Runtime: Python 3.12 → Role: con `sns:Publish` al topic. Pega el handler que traduce webhook Alertmanager → SNS Publish. |
-| `aws_lambda_function_url.alertmgr_to_sns` | λ Lambda | En la función: **Configuration → Function URL → Create function URL** → Auth: NONE (Lambda Function URLs públicas, pero solo Alertmanager dentro de la VPC conoce la URL). |
+| `aws_efs_file_system.obs` | 🗂️ EFS | **EFS → Create file system → Customize** → Name: `dkron-obs` → VPC: dkron-vpc → **Encryption: Enabled** (default KMS). |
+| `aws_efs_mount_target.obs` (×2 — `for_each` sobre `private_subnet_ids`) | 🗂️ EFS | El FS → **Network → Manage** → Add mount target por **cada** subnet privada → Security group: `dkron-efs`. |
+| `aws_efs_access_point.prometheus` | 🗂️ EFS | **EFS → Access points → Create access point** → File system: `dkron-obs` → Root path: `/prometheus` → POSIX user: **uid 65534 / gid 65534** (`nobody`) → Creation info: owner 65534/65534, perms `0755`. |
+| `aws_efs_access_point.grafana` | 🗂️ EFS | Mismo wizard → Root path: `/grafana` → POSIX user: **uid 472 / gid 472** (uid oficial de Grafana) → Creation info: owner 472/472, perms `0755`. |
+| `aws_security_group.efs` | 🌐 VPC | **VPC → Security groups → Create** → Name: `dkron-efs` → VPC: dkron-vpc → Inbound: **NFS 2049** desde los SGs `dkron-prom-sg` Y `dkron-graf-sg` → Outbound: all → Create. |
+| `aws_security_group.prometheus` | 🌐 VPC | **VPC → SGs → Create** → Name: `dkron-prom-sg` → Description: "Prometheus task — scrapea EC2 y llama Lambda URL" → VPC: dkron-vpc → **Sin ingress** → Outbound: all (necesita scrapear EC2 y llamar Lambda URL). |
+| `aws_security_group.grafana` | 🌐 VPC | **VPC → SGs → Create** → Name: `dkron-graf-sg` → Description: "Grafana task — recibe del ALB en 3000, consulta Prometheus" → VPC: dkron-vpc → Inbound: TCP 3000 from `0.0.0.0/0` (el ALB filtrará; el SG-alb ya es restrictivo) → Outbound: all. |
+| `aws_security_group_rule.app_from_prom_8080` y `.app_from_prom_9100` | 🌐 VPC | En **`dkron-app-sg`** (creado en 5.5): **Edit inbound rules → Add rule** dos veces → TCP **8080** from SG `dkron-prom-sg` (description "Prometheus scrape Dkron"), TCP **9100** from SG `dkron-prom-sg` (description "Prometheus scrape node_exporter"). |
+| `aws_ssm_parameter.prometheus_yml` | 🔐 SSM | **Systems Manager → Parameter Store → Create parameter** → Name: `/dkron/prometheus/prometheus.yml` → Tier: **Advanced** → Type: String → Value: el YAML con `scrape_configs` apuntando a `file_sd_configs` de `/etc/prometheus/targets/{dkron,dkron-host}.json`. |
+| `aws_ssm_parameter.prometheus_target_dkron` | 🔐 SSM | Mismo wizard → Name: `/dkron/prometheus/targets/dkron.json` → Type: String → Value: `[{"targets":["<ec2-private-ip>:8080"],"labels":{"job":"dkron","role":"scheduler"}}]`. |
+| `aws_ssm_parameter.prometheus_target_host` | 🔐 SSM | Name: `/dkron/prometheus/targets/dkron-host.json` → Type: String → Value: idem con `:9100` y label `job=dkron-host`. |
+| `aws_ssm_parameter.prometheus_rules` | 🔐 SSM | Name: `/dkron/prometheus/rules.yml` → Type: String → Value: las 3 alertas `DkronHighFailureRate`, `DkronNoJobsRunning`, `DkronTargetDown`. |
+| `aws_ssm_parameter.alertmanager_yml` | 🔐 SSM | Name: `/dkron/alertmanager/alertmanager.yml` → Type: String → Value: route `receiver=sns` + webhook a la Function URL de la Lambda (la rellenas tras crear la Lambda). |
+| `aws_ssm_parameter.grafana_admin_password` | 🔐 SSM | Name: `/dkron/prod/grafana/admin_password` → Type: **SecureString** → KMS: alias/aws/ssm → Value: el password admin de Grafana → Tags: `Name=dkron-graf-pass`. |
+| `aws_ssm_parameter.grafana_datasource` | 🔐 SSM | Name: `/dkron/grafana/datasource.yml` → Type: String → Value: YAML con datasource Prometheus `url=http://prometheus.dkron.local:9090`. |
+| `aws_ssm_parameter.grafana_dashboard` | 🔐 SSM | Name: `/dkron/grafana/dashboard.json` → Tier: **Advanced** → Type: String → Value: el JSON del dashboard `dkron-red.json`. |
+| `aws_ssm_parameter.grafana_dashboard_provider` | 🔐 SSM | Name: `/dkron/grafana/dashboard_provider.yml` → Type: String → Value: YAML con `providers: [{name=dkron, folder=Dkron, type=file, options.path=/var/lib/grafana/dashboards}]`. Sin este parámetro Grafana no carga el JSON al arrancar. |
+| `aws_ecs_cluster.obs` | 🐳 ECS | **ECS → Clusters → Create cluster** → Name: `dkron-obs` → Infrastructure: **AWS Fargate (serverless)** → Monitoring: **Container Insights: disabled** (ahorra costo). |
+| `aws_ecs_cluster_capacity_providers.obs` | 🐳 ECS | El cluster → pestaña **Infrastructure → Capacity providers → Update** → marca **FARGATE** y **FARGATE_SPOT**. |
+| `aws_service_discovery_private_dns_namespace.this` | 🧭 Cloud Map | **AWS Cloud Map → Create namespace** → Name: `dkron.local` → Type: **API calls and DNS queries in VPCs** → VPC: dkron-vpc. |
+| `aws_service_discovery_service.prometheus` | 🧭 Cloud Map | El namespace → **Create service** → Name: `prometheus` → Service discovery configuration: A record, TTL 10s, Routing policy **MULTIVALUE** → Health check: Custom (failure threshold 1). Así Grafana resuelve `prometheus.dkron.local`. |
+| `aws_cloudwatch_log_group.obs` | 📊 CloudWatch | **CloudWatch → Log groups → Create log group** → Name: `/dkron/ecs/obs` → Retention: **1 day**. Un **único** log group compartido por Prometheus, Alertmanager y Grafana (stream prefix los separa). |
+| `aws_iam_role.exec` | 🔐 IAM | **IAM → Roles → Create role** → Trusted entity: AWS service → Use case: **Elastic Container Service → ECS Task** → Role name: `dkron-obs-exec` → Attach managed: `AmazonECSTaskExecutionRolePolicy` → luego **Create inline policy** → JSON: `ssm:GetParameter, ssm:GetParameters, kms:Decrypt` sobre `arn:aws:ssm:us-east-1:*:parameter/dkron/*`. |
+| `aws_iam_role.task` | 🔐 IAM | Mismo wizard → Role name: `dkron-obs-task` → **Create inline policy** → JSON: `elasticfilesystem:ClientMount/ClientWrite/ClientRootAccess` sobre el ARN del file system `dkron-obs`. |
+| `aws_iam_role.lambda` + policies | 🔐 IAM | **IAM → Roles → Create role** → Use case: **Lambda** → Role name: `dkron-alertmgr-lambda` → Attach managed: `AWSLambdaBasicExecutionRole` → **Create inline policy**: `sns:Publish` sobre el ARN del topic `dkron-alerts`. |
+| `aws_ecs_task_definition.prometheus` | 🐳 ECS | **ECS → Task definitions → Create new task definition** → Family: `dkron-prometheus` → Launch type: **Fargate** → CPU: 0.25 vCPU, Memory: 0.5 GB → Execution role: `dkron-obs-exec`, Task role: `dkron-obs-task` → Containers: `config-init` (essential=false, `dependsOn=null`, lee SSM con awscli) + `prometheus:v2.54.1` (essential=true, `dependsOn config-init=SUCCESS`, puerto 9090) + `alertmanager:v0.27.0` (essential=true, puerto 9093) → Volume EFS `prom-data` con `transit_encryption=ENABLED` y access point `prometheus`. |
+| `aws_ecs_service.prometheus` | 🐳 ECS | En el cluster `dkron-obs` → **Services → Create** → Launch type: FARGATE → Task definition: `dkron-prometheus` → Service name: `prometheus` → Desired count: 1 → Network: subnets **privadas**, SG `dkron-prom-sg`, **Assign public IP: DISABLED** → Service discovery: registra al servicio Cloud Map `prometheus.dkron.local`. |
+| `aws_ecs_task_definition.grafana` | 🐳 ECS | **Task definitions → Create** → Family: `dkron-grafana` → Fargate, 0.25 vCPU / 0.5 GB → Execution+Task role: `dkron-obs-exec/task` → Containers: (a) `config-init` (`amazon/aws-cli:2.15.0`, essential=false, hace `aws ssm get-parameter` de datasource + dashboard_provider + dashboard.json y los escribe a `/var/lib/grafana/provisioning/{datasources,dashboards}/` y `/var/lib/grafana/dashboards/`) + (b) `grafana:11.2.0` (essential=true, `dependsOn config-init=SUCCESS`, port 3000) con env vars `GF_SECURITY_ADMIN_USER=admin`, `GF_USERS_ALLOW_SIGN_UP=false`, `GF_AUTH_ANONYMOUS_ENABLED=false`, **`GF_PATHS_PROVISIONING=/var/lib/grafana/provisioning`** y **secret** `GF_SECURITY_ADMIN_PASSWORD` desde el SSM SecureString `dkron-graf-pass` → Volume EFS `graf-data` con access point `grafana`. |
+| `aws_ecs_service.grafana` | 🐳 ECS | **Services → Create** → Task definition: `dkron-grafana` → Desired count: 1 → Network: subnets privadas, SG `dkron-graf-sg` → Load balancing: ALB existente `dkron-alb`, target group `dkron-grafana`, container `grafana`, port 3000. |
+| `aws_lb_target_group.grafana` | ⚖️ EC2 | **EC2 → Target groups → Create target group** → Target type: **IP addresses** (Fargate awsvpc) → Name: `dkron-grafana` → Protocol HTTP, Port 3000 → VPC: dkron-vpc → Health check path: `/api/health`, matcher 200. |
+| `aws_lb_listener.grafana` | ⚖️ EC2 | En el ALB `dkron-alb` → **Listeners → Add listener** → Protocol HTTP, Port **3000** → Default action: Forward → Target group `dkron-grafana` → Add. |
+| `aws_sns_topic.alerts` | 📢 SNS | **SNS → Topics → Create topic** → Type: **Standard** → Name: `dkron-alerts` → Create. |
+| `aws_sns_topic_subscription.email` | 📢 SNS | El topic → **Create subscription** → Protocol: **Email** → Endpoint: tu correo. **Confirma desde tu inbox** antes de continuar. |
+| `aws_lambda_function.alertmgr_to_sns` | λ Lambda | **Lambda → Create function** → Author from scratch → Function name: `dkron-alertmgr-to-sns` → Runtime: **Python 3.12** → Architecture: x86_64 → Execution role: usar el rol existente `dkron-alertmgr-lambda` → Sube el zip generado por Terraform (`alertmgr_to_sns.zip`) o pega el código del handler que itera `body["alerts"]` y publica en SNS → Configuration → Environment variables: `TOPIC_ARN = <arn del topic dkron-alerts>`. |
+| `aws_lambda_function_url.alertmgr_to_sns` | λ Lambda | La función → **Configuration → Function URL → Create function URL** → Auth type: **NONE** → Save. La URL resultante es la que apunta Alertmanager en `alertmanager.yml` (solo Alertmanager dentro de la VPC la conoce). |
 
 > 🎯 **Por qué hay tantos recursos:** Prometheus y Grafana no son "una EC2 con un docker compose" — los corremos como containers Fargate independientes para que **no compitan con Dkron por CPU/RAM** en la t3.micro. La complejidad extra (EFS, IAM roles, task definitions, SGs) es el precio de la separación. En el reporte sección A justifica esta decisión.
 
@@ -4687,6 +4769,17 @@ infra/modules/monitoring/
 └── dashboards/
     └── dkron-red.json
 ```
+
+### ⚠️ Antes de continuar — copia el dashboard JSON al path del módulo
+
+> 🛑 **PASO OBLIGATORIO ANTES DE `terraform apply`** — el archivo `grafana.tf` (más abajo) referencia `file("${path.module}/dashboards/dkron-red.json")`. Si no existe, `terraform apply -target=module.monitoring` revienta con `Error: Invalid function argument: open ...: no such file or directory`.
+
+```bash
+mkdir -p infra/modules/monitoring/dashboards
+cp compose/grafana/dashboards/dkron-red.json infra/modules/monitoring/dashboards/dkron-red.json
+```
+
+Es el **mismo** JSON que ya pegaste en la Parte 3 (sección 3.2). Versionarlo aquí satisface el requisito PDF "dashboards versionados como código".
 
 ### 📋 8.2.0 `infra/modules/monitoring/variables.tf` (copy-paste)
 
@@ -5303,6 +5396,21 @@ resource "aws_ssm_parameter" "grafana_dashboard" {
   value = file("${path.module}/dashboards/dkron-red.json")   # mismo JSON que en compose/grafana/dashboards/
 }
 
+# Provider que le dice a Grafana DÓNDE buscar dashboards .json (autoload).
+resource "aws_ssm_parameter" "grafana_dashboard_provider" {
+  name = "/dkron/grafana/dashboard_provider.yml"
+  type = "String"
+  value = yamlencode({
+    apiVersion = 1
+    providers = [{
+      name    = "dkron"
+      folder  = "Dkron"
+      type    = "file"
+      options = { path = "/var/lib/grafana/dashboards" }
+    }]
+  })
+}
+
 resource "aws_ecs_task_definition" "grafana" {
   family                   = "dkron-grafana"
   network_mode             = "awsvpc"
@@ -5322,15 +5430,47 @@ resource "aws_ecs_task_definition" "grafana" {
   }
 
   container_definitions = jsonencode([
+    # Init container: baja datasource + dashboard + provider de SSM al EFS
+    # ANTES de que arranque Grafana. Sin esto, Grafana arranca vacío.
+    {
+      name      = "config-init"
+      image     = "amazon/aws-cli:2.15.0"
+      essential = false
+      command = ["sh", "-c", <<-EOT
+        set -e
+        mkdir -p /var/lib/grafana/provisioning/datasources
+        mkdir -p /var/lib/grafana/provisioning/dashboards
+        mkdir -p /var/lib/grafana/dashboards
+        aws ssm get-parameter --name /dkron/grafana/datasource.yml          --query Parameter.Value --output text > /var/lib/grafana/provisioning/datasources/prometheus.yml
+        aws ssm get-parameter --name /dkron/grafana/dashboard_provider.yml  --query Parameter.Value --output text > /var/lib/grafana/provisioning/dashboards/dkron.yml
+        aws ssm get-parameter --name /dkron/grafana/dashboard.json          --query Parameter.Value --output text > /var/lib/grafana/dashboards/dkron-red.json
+        # Grafana corre como uid 472 — el access point EFS ya pone owner 472:472, pero forzamos por si acaso
+        chown -R 472:472 /var/lib/grafana/provisioning /var/lib/grafana/dashboards || true
+      EOT
+      ]
+      mountPoints = [{ sourceVolume = "graf-data", containerPath = "/var/lib/grafana" }]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.obs.name
+          "awslogs-region"        = var.region
+          "awslogs-stream-prefix" = "grafana-init"
+        }
+      }
+    },
     {
       name      = "grafana"
       image     = "grafana/grafana:11.2.0"
       essential = true
+      dependsOn = [{ containerName = "config-init", condition = "SUCCESS" }]
       portMappings = [{ containerPort = 3000, protocol = "tcp" }]
       environment = [
-        { name = "GF_SECURITY_ADMIN_USER", value = "admin" },
-        { name = "GF_USERS_ALLOW_SIGN_UP", value = "false" },
-        { name = "GF_AUTH_ANONYMOUS_ENABLED", value = "false" }
+        { name = "GF_SECURITY_ADMIN_USER",      value = "admin" },
+        { name = "GF_USERS_ALLOW_SIGN_UP",      value = "false" },
+        { name = "GF_AUTH_ANONYMOUS_ENABLED",   value = "false" },
+        # Le dice a Grafana que las definiciones de provisioning están en EFS
+        # (path por defecto es /etc/grafana/provisioning, lo movemos a /var/lib/grafana)
+        { name = "GF_PATHS_PROVISIONING",       value = "/var/lib/grafana/provisioning" }
       ]
       secrets = [
         { name = "GF_SECURITY_ADMIN_PASSWORD", valueFrom = aws_ssm_parameter.grafana_admin_password.arn }
@@ -5388,7 +5528,7 @@ resource "aws_lb_target_group" "grafana" {
 }
 ```
 
-> ℹ️ **Para entregar el dashboard JSON desde el repo:** copia el archivo `compose/grafana/dashboards/dkron-red.json` (creado en la Parte 3) a `infra/modules/monitoring/dashboards/dkron-red.json` — es exactamente el mismo. Eso satisface el requisito del PDF: "dashboards versionados como código".
+> ℹ️ **Recordatorio:** ya copiaste `compose/grafana/dashboards/dkron-red.json` → `infra/modules/monitoring/dashboards/dkron-red.json` antes de empezar 8.2.0 (es el JSON que `grafana.tf` arriba lee con `file(...)`).
 
 ### Paso 6 — Lambda que traduce webhooks de Alertmanager a SNS
 **`infra/modules/monitoring/lambda_sns.tf`:**
@@ -6289,8 +6429,9 @@ aws rds describe-db-instances --region us-east-1
 aws ec2 describe-vpcs --filters "Name=tag:Project,Values=dkron"
 aws elbv2 describe-load-balancers --query "LoadBalancers[?Tags[?Key=='Project' && Value=='dkron']]"
 
-# El bucket auxiliar de Ansible-SSM puede quedar — bórralo manualmente si force_destroy=false:
-aws s3 rb s3://dkron-ansible-ssm-<account-id> --force
+# El bucket auxiliar de Ansible-SSM lo destruye Terraform (force_destroy=true).
+# Solo borra a mano si por alguna razón el destroy lo dejó huérfano:
+# aws s3 rb s3://dkron-ansible-ssm-<account-id> --force
 ```
 
 > ⚠️ El bucket de tfstate **NO lo destruyas**. Tu state vive ahí. Si lo borras, empiezas de cero.
