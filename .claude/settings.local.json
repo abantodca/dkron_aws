@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//home/carlos/.config/cosmic/com.system76.CosmicTerm/**)",
+      "Read(//home/carlos/.config/cosmic/com.system76.CosmicTerm/v1/**)"
+    ]
+  }
+}

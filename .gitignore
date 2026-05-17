@@ -1,0 +1,8 @@
+.terraform/
+*.tfstate
+*.tfstate.backup
+.env
+.env.local
+*.tfvars
+!*.tfvars.example
+.DS_Store

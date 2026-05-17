@@ -1,0 +1,29 @@
+groups:
+  - name: dkron.rules
+    rules:
+      - alert: DkronHighFailureRate
+        expr: increase(dkron_failed_jobs_total[5m]) > 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Demasiados jobs fallidos en Dkron"
+          description: "Más de 5 jobs fallaron en los últimos 5 minutos."
+
+      - alert: DkronNoJobsRunning
+        expr: max_over_time(dkron_running_jobs[1h]) < 1
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Scheduler de Dkron sin actividad"
+          description: "Ningún job ha corrido en la última hora — posible scheduler caído."
+
+      - alert: DkronTargetDown
+        expr: up{job="dkron"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Dkron no responde a Prometheus"
+          description: "El target Dkron no expone /metrics hace 2 min."

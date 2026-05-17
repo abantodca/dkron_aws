@@ -1,0 +1,45 @@
+{
+  "uid": "dkron-red",
+  "title": "Dkron — RED",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Rate — jobs/min (success)",
+      "targets": [{ "expr": "rate(dkron_succeeded_jobs_total[5m]) * 60" }],
+      "gridPos": { "x": 0, "y": 0, "w": 8, "h": 6 }
+    },
+    {
+      "type": "stat",
+      "title": "Errors — failures/min",
+      "targets": [{ "expr": "rate(dkron_failed_jobs_total[5m]) * 60" }],
+      "gridPos": { "x": 8, "y": 0, "w": 8, "h": 6 }
+    },
+    {
+      "type": "stat",
+      "title": "Running jobs (now)",
+      "targets": [{ "expr": "dkron_running_jobs" }],
+      "gridPos": { "x": 16, "y": 0, "w": 8, "h": 6 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Success / Failure throughput",
+      "targets": [
+        { "expr": "rate(dkron_succeeded_jobs_total[5m])", "legendFormat": "success" },
+        { "expr": "rate(dkron_failed_jobs_total[5m])", "legendFormat": "failed" }
+      ],
+      "gridPos": { "x": 0, "y": 6, "w": 24, "h": 8 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Tasa de éxito (SLO 95%)",
+      "targets": [{
+        "expr": "sum(rate(dkron_succeeded_jobs_total[5m])) / clamp_min(sum(rate(dkron_succeeded_jobs_total[5m]) + rate(dkron_failed_jobs_total[5m])), 0.001)"
+      }],
+      "gridPos": { "x": 0, "y": 14, "w": 24, "h": 8 }
+    }
+  ]
+}
