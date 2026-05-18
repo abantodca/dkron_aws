@@ -42,10 +42,13 @@ resource "aws_ecs_task_definition" "grafana" {
   family                   = "${var.project}-grafana"
   network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
-  cpu                      = "256"
-  memory                   = "512"
-  execution_role_arn       = aws_iam_role.exec.arn
-  task_role_arn            = aws_iam_role.task.arn
+  # Grafana 11.2 recomienda mínimo 1 GB. Con 512 MB hacía OOM kill silencioso
+  # durante el boot (sqlite migrate + plugin scan), causando loop initial->drain.
+  cpu    = "512"
+  memory = "1024"
+
+  execution_role_arn = aws_iam_role.exec.arn
+  task_role_arn      = aws_iam_role.task.arn
 
   volume {
     name = "graf-data"
