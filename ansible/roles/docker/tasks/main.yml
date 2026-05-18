@@ -35,6 +35,9 @@
       - "docker>=7.1"
       - "PyYAML"
     state: present
+    # --ignore-installed evita que pip intente desinstalar requests/urllib3 del rpm
+    # (sin RECORD file). La integridad del rpm se repara abajo.
+    extra_args: --ignore-installed
 
 - name: Verificar integridad de python3-urllib3 (pip puede sobreescribir sus archivos y romper awscli)
   ansible.builtin.command: rpm -V python3-urllib3  # noqa: command-instead-of-module
