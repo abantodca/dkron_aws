@@ -59,15 +59,30 @@ resource "aws_iam_role_policy" "task_efs" {
 # El container config-init invoca `aws ssm get-parameter` en runtime, lo cual
 # usa el TASK role (no el execution role). La policy del execution role solo
 # cubre los `secrets`/`valueFrom` que ECS agent resuelve antes de arrancar.
+#
+# kms:Decrypt va en un statement aparte: el resource es la KMS key, no el
+# parameter SSM, así que aplicarlo al ARN de SSM era un implicit-deny.
 resource "aws_iam_role_policy" "task_ssm" {
   role = aws_iam_role.task.id
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Effect   = "Allow"
-      Action   = ["ssm:GetParameter", "ssm:GetParameters", "kms:Decrypt"]
-      Resource = "arn:aws:ssm:${var.region}:*:parameter/${var.project}/*"
-    }]
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["ssm:GetParameter", "ssm:GetParameters"]
+        Resource = "arn:aws:ssm:${var.region}:*:parameter/${var.project}/*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt"]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "kms:ViaService" = "ssm.${var.region}.amazonaws.com"
+          }
+        }
+      }
+    ]
   })
 }
 

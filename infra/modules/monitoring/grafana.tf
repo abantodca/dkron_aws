@@ -77,9 +77,10 @@ resource "aws_ecs_task_definition" "grafana" {
         mkdir -p /var/lib/grafana/provisioning/datasources
         mkdir -p /var/lib/grafana/provisioning/dashboards
         mkdir -p /var/lib/grafana/dashboards
-        aws ssm get-parameter --name /${var.project}/grafana/datasource.yml          --query Parameter.Value --output text > /var/lib/grafana/provisioning/datasources/prometheus.yml
-        aws ssm get-parameter --name /${var.project}/grafana/dashboard_provider.yml  --query Parameter.Value --output text > /var/lib/grafana/provisioning/dashboards/dkron.yml
-        aws ssm get-parameter --name /${var.project}/grafana/dashboard.json          --query Parameter.Value --output text > /var/lib/grafana/dashboards/dkron-red.json
+        # --with-decryption: los 3 parameters de grafana son SecureString (KMS)
+        aws ssm get-parameter --with-decryption --name /${var.project}/grafana/datasource.yml          --query Parameter.Value --output text > /var/lib/grafana/provisioning/datasources/prometheus.yml
+        aws ssm get-parameter --with-decryption --name /${var.project}/grafana/dashboard_provider.yml  --query Parameter.Value --output text > /var/lib/grafana/provisioning/dashboards/dkron.yml
+        aws ssm get-parameter --with-decryption --name /${var.project}/grafana/dashboard.json          --query Parameter.Value --output text > /var/lib/grafana/dashboards/dkron-red.json
         # Grafana corre como uid 472 - el access point EFS ya pone owner 472:472, forzamos por si acaso
         chown -R 472:472 /var/lib/grafana/provisioning /var/lib/grafana/dashboards || true
       EOT
