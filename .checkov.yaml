@@ -44,6 +44,7 @@ skip-check:
   - CKV_AWS_24    # Ingress 22 (regla dinámica activada sólo con CIDRs explícitos)
 
   # ─── Lambda alertmgr-to-sns: glue de 20 líneas, scope mínimo ───────────────
+  - CKV_AWS_115   # Reserved concurrent executions (quota cuenta = 10, AWS exige >= 10 unreserved)
   - CKV_AWS_117   # Lambda dentro de VPC (sólo llama SNS público)
   - CKV_AWS_116   # DLQ (Alertmanager reintenta)
   - CKV_AWS_272   # Code-signing (overkill)

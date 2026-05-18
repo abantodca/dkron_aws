@@ -37,13 +37,14 @@ data "archive_file" "alertmgr_to_sns" {
 # Lambda mínima de glue Alertmanager → SNS. Funciones evitadas a propósito
 # (VPC/DLQ/CMK env/code-signing) — ver .checkov.yaml.
 resource "aws_lambda_function" "alertmgr_to_sns" {
-  function_name                  = "${var.project}-alertmgr-to-sns"
-  runtime                        = "python3.12"
-  handler                        = "index.handler"
-  role                           = aws_iam_role.lambda.arn
-  filename                       = data.archive_file.alertmgr_to_sns.output_path
-  source_code_hash               = data.archive_file.alertmgr_to_sns.output_base64sha256
-  reserved_concurrent_executions = 5
+  function_name    = "${var.project}-alertmgr-to-sns"
+  runtime          = "python3.12"
+  handler          = "index.handler"
+  role             = aws_iam_role.lambda.arn
+  filename         = data.archive_file.alertmgr_to_sns.output_path
+  source_code_hash = data.archive_file.alertmgr_to_sns.output_base64sha256
+  # Sin reserved_concurrent_executions: AWS exige >= 10 concurrent unreserved tras
+  # cualquier reserva, y el quota por defecto de cuentas nuevas es 10.
 
   tracing_config {
     mode = "Active"
