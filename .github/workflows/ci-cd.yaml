@@ -53,6 +53,12 @@ jobs:
       - name: yamllint
         run: yamllint ansible/
       - name: ansible-lint
+        # ANSIBLE_CONFIG/ROLES_PATH para que el syntax-check interno de
+        # ansible-lint resuelva los roles referenciados en playbooks/site.yml
+        # (ansible.cfg vive en ansible/, no en la raíz del repo).
+        env:
+          ANSIBLE_CONFIG: ansible/ansible.cfg
+          ANSIBLE_ROLES_PATH: ansible/roles
         run: ansible-lint ansible/
       - name: Syntax check de los playbooks
         # Inventory dummy: evitamos cargar aws_ec2.yml (plugin amazon.aws.aws_ec2 +

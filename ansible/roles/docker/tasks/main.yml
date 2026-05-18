@@ -37,14 +37,16 @@
     state: present
 
 - name: Verificar integridad de python3-urllib3 (pip puede sobreescribir sus archivos y romper awscli)
-  ansible.builtin.command: rpm -V python3-urllib3
+  ansible.builtin.command: rpm -V python3-urllib3  # noqa: command-instead-of-module
   register: urllib3_verify
   failed_when: false
   changed_when: false
 
 - name: Reinstalar python3-urllib3 si está corrupto
   ansible.builtin.command: dnf reinstall -y python3-urllib3
+  register: urllib3_reinstall
   when: urllib3_verify.stdout | length > 0
+  changed_when: urllib3_reinstall.rc == 0
 
 - name: Obtener token efímero de ECR (válido 12h)
   ansible.builtin.command:
@@ -54,9 +56,14 @@
   no_log: true
   tags: [deploy]
 
-- name: docker login al ECR
+- name: Docker login al ECR
   ansible.builtin.shell:
-    cmd: "echo '{{ ecr_token.stdout }}' | docker login --username AWS --password-stdin {{ ecr_repo | regex_replace('/.*$', '') }}"
+    cmd: >-
+      set -o pipefail;
+      echo '{{ ecr_token.stdout }}'
+      | docker login --username AWS --password-stdin
+      {{ ecr_repo | regex_replace('/.*$', '') }}
+    executable: /bin/bash
   changed_when: false
   no_log: true
   tags: [deploy]
