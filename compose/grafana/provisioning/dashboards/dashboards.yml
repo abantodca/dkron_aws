@@ -3,5 +3,6 @@ providers:
   - name: dkron
     folder: Dkron
     type: file
+    disableDeletion: true
     options:
-      path: /var/lib/grafana/dashboards
+      path: /etc/grafana/provisioning/dashboards

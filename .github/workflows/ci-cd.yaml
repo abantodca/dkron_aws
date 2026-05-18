@@ -1,0 +1,204 @@
+name: ci-cd
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: tf-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  iac-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with: { terraform_version: 1.10.5 }
+      - name: fmt
+        run: terraform fmt -check -recursive
+        working-directory: infra/envs/prod
+      - name: init
+        run: terraform init -backend=false
+        working-directory: infra/envs/prod
+      - name: validate
+        run: terraform validate
+        working-directory: infra/envs/prod
+      - uses: terraform-linters/setup-tflint@v4
+      - run: tflint --recursive
+        working-directory: infra
+      - uses: bridgecrewio/checkov-action@master
+        with:
+          directory: infra/
+          quiet: true
+          soft_fail: false
+
+  ansible-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      # Creds AWS: el inventory aws_ec2.yml usa plugin amazon.aws.aws_ec2 + lookups SSM
+      # que necesitan credenciales incluso para --syntax-check (Ansible evalúa el
+      # inventory antes de parsear los playbooks).
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+      - name: Install ansible-lint, yamllint y boto3 (lookups AWS)
+        run: |
+          pip install "ansible-core==2.17.*" "ansible-lint==24.7.*" "yamllint==1.35.*" "boto3>=1.34" "botocore>=1.34"
+          ansible-galaxy collection install -r ansible/requirements.yml
+      - name: yamllint
+        run: yamllint ansible/
+      - name: ansible-lint
+        run: ansible-lint ansible/
+      - name: Syntax check de los playbooks
+        working-directory: ansible
+        run: |
+          ansible-playbook playbooks/site.yml --syntax-check -i inventories/prod/aws_ec2.yml
+          ansible-playbook playbooks/deploy.yml --syntax-check -i inventories/prod/aws_ec2.yml
+
+  replicate-image:
+    runs-on: ubuntu-latest
+    needs: [iac-validate, ansible-validate]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+      - uses: aws-actions/amazon-ecr-login@v2
+      - name: Pull, tag, push
+        run: |
+          IMG=dkron/dkron:v4.0.9
+          docker pull $IMG
+          docker tag $IMG ${{ secrets.ECR_REPO }}:v4.0.9
+          docker push ${{ secrets.ECR_REPO }}:v4.0.9
+
+  trivy-scan:
+    runs-on: ubuntu-latest
+    needs: replicate-image
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+      - uses: aws-actions/amazon-ecr-login@v2
+      - uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ secrets.ECR_REPO }}:v4.0.9
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+          trivyignores: .trivyignore
+
+  plan:
+    runs-on: ubuntu-latest
+    needs: trivy-scan
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+      - uses: hashicorp/setup-terraform@v3
+        with: { terraform_version: 1.10.5 }
+      - run: terraform init
+        working-directory: infra/envs/prod
+      - run: terraform plan -no-color
+        working-directory: infra/envs/prod
+        env:
+          TF_VAR_owner:                  ${{ secrets.TF_OWNER }}
+          TF_VAR_ssh_public_key:         ${{ secrets.SSH_PUBLIC_KEY }}
+          TF_VAR_github_repo:            ${{ github.repository }}
+          TF_VAR_alert_email:            ${{ secrets.ALERT_EMAIL }}
+          TF_VAR_grafana_admin_password: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+
+  apply:
+    runs-on: ubuntu-latest
+    needs: trivy-scan
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production
+    outputs:
+      ec2_instance_id: ${{ steps.tf.outputs.ec2_instance_id }}
+      alb_dns_name:    ${{ steps.tf.outputs.alb_dns_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+      - uses: hashicorp/setup-terraform@v3
+        with: { terraform_version: 1.10.5 }
+      - run: terraform init
+        working-directory: infra/envs/prod
+      - id: tf
+        name: terraform apply
+        working-directory: infra/envs/prod
+        env:
+          TF_VAR_owner:                  ${{ secrets.TF_OWNER }}
+          TF_VAR_ssh_public_key:         ${{ secrets.SSH_PUBLIC_KEY }}
+          TF_VAR_github_repo:            ${{ github.repository }}
+          TF_VAR_alert_email:            ${{ secrets.ALERT_EMAIL }}
+          TF_VAR_grafana_admin_password: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+        run: |
+          terraform apply -auto-approve
+          echo "ec2_instance_id=$(terraform output -raw ec2_instance_id)" >> $GITHUB_OUTPUT
+          echo "alb_dns_name=$(terraform output -raw alb_dns_name)"       >> $GITHUB_OUTPUT
+
+  ansible-deploy:
+    runs-on: ubuntu-latest
+    needs: apply
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+      - name: Install Ansible + dependencias
+        run: |
+          pip install "ansible-core==2.17.*" "boto3>=1.34" "botocore>=1.34"
+          ansible-galaxy collection install -r ansible/requirements.yml
+          # Plugin SSM para Session Manager
+          curl -o session-manager.deb "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb"
+          sudo dpkg -i session-manager.deb
+      - name: Esperar a que la EC2 esté Online en SSM
+        run: |
+          for i in {1..30}; do
+            STATUS=$(aws ssm describe-instance-information \
+              --filters "Key=InstanceIds,Values=${{ needs.apply.outputs.ec2_instance_id }}" \
+              --query "InstanceInformationList[].PingStatus" --output text)
+            [ "$STATUS" = "Online" ] && exit 0
+            sleep 10
+          done
+          echo "EC2 no quedó Online en SSM tras 5 minutos"
+          exit 1
+      - name: Deploy con ansible-playbook
+        working-directory: ansible
+        run: |
+          ansible-playbook playbooks/deploy.yml \
+            --extra-vars "dkron_image_tag=v4.0.9"
+      - name: Smoke test desde el ALB
+        run: |
+          ALB="${{ needs.apply.outputs.alb_dns_name }}"
+          for i in {1..20}; do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://$ALB/v1/jobs" || true)
+            [ "$CODE" = "200" ] && exit 0
+            sleep 10
+          done
+          echo "ALB nunca devolvió 200 tras 200s"
+          exit 1

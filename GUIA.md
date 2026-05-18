@@ -402,7 +402,6 @@ services:
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana_data:/var/lib/grafana
     ports:
       - "3000:3000"
@@ -502,18 +501,21 @@ datasources:
     isDefault: true
 ```
 
-**Archivo `compose/grafana/provisioning/dashboards/dkron.yml`** (auto-carga del dashboard):
+**Archivo `compose/grafana/provisioning/dashboards/dashboards.yml`** (provider de dashboards — DEBE vivir en `provisioning/dashboards/`, no en `provisioning/datasources/`; si lo dejas en `datasources/` Grafana intenta parsearlo como datasource y lo ignora):
 ```yaml
 apiVersion: 1
 providers:
   - name: dkron
     folder: Dkron
     type: file
+    disableDeletion: true
     options:
-      path: /var/lib/grafana/dashboards
+      # Apunta al mismo directorio donde está montado el JSON (provisioning/dashboards/).
+      # Evita la necesidad de un segundo mount ./grafana/dashboards.
+      path: /etc/grafana/provisioning/dashboards
 ```
 
-**Archivo `compose/grafana/dashboards/dkron-red.json`** (dashboard mínimo método RED — pégalo tal cual):
+**Archivo `compose/grafana/provisioning/dashboards/dkron-red.json`** (dashboard mínimo método RED — pégalo tal cual; vive junto al provider para que Grafana lo encuentre con un solo mount):
 ```json
 {
   "uid": "dkron-red",
@@ -709,7 +711,7 @@ Las mismas tres métricas (más `up{job="dkron"}` que añade Prometheus) las pue
 - En AWS (Parte 5-6): vas a tener una **EC2 con Docker Compose configurado por Ansible**. Significa que debajo de los containers tienes una capa adicional ("¿la EC2 tiene Docker instalado?", "¿la versión correcta de docker compose plugin?", "¿el daemon corre con los flags que queremos?"). Esa capa la gestiona Ansible — no Terraform, no el container.
 
 **Lo que vas a defender en el reporte (te lo dejo apuntado):**
-1. Containers eliminan la matriz de "funciona en mi máquina" — la imagen `dkron/dkron:v3.2.7` es bit-a-bit la misma en local y en EC2.
+1. Containers eliminan la matriz de "funciona en mi máquina" — la imagen `dkron/dkron:v4.0.9` es bit-a-bit la misma en local y en EC2.
 2. Pero containers **no eliminan** la necesidad de gestión de configuración cuando corres en EC2: sigues teniendo que instalar el motor (Docker), gestionar el `compose.yml`, preocuparte de actualizaciones de seguridad del kernel. Por eso existe Ansible.
 3. ECS Fargate **sí** elimina esa capa intermedia (no hay máquina que configurar). Por eso lo elegimos para Prometheus/Grafana, que son servicios sin estado de aplicación.
 4. La elección "EC2 + Ansible" para Dkron NO es un retroceso pedagógico: es el único camino que te permite **demostrar** la separación IaC↔gestión de configuración en concreto en el reporte (concepto B.1).
@@ -1256,7 +1258,7 @@ Estas las contestas en el **REPORTE.md**. La guía te lleva paso a paso a las re
 ## ❓ 2.1 ¿Qué es un container y por qué Docker?
 Un **container** es una caja que empaqueta una aplicación con todo lo que necesita (librerías, runtime, configuración). Lo bueno: corre igual en tu laptop, en AWS o en Marte.
 
-**Imagen** = la receta (`dkron/dkron:v3.2.7`). **Container** = la receta corriendo.
+**Imagen** = la receta (`dkron/dkron:v4.0.9`). **Container** = la receta corriendo.
 
 **Regla del bootcamp:** NO se permite hacer fork de Dkron ni modificar su código. Usa la imagen oficial.
 
@@ -1433,7 +1435,7 @@ Un **firewall virtual** alrededor de un recurso. Define qué puertos están abie
 ```bash
 cd ansible
 ansible-playbook -i inventories/prod/aws_ec2.yml playbooks/deploy.yml \
-  --extra-vars "image_tag=v3.2.7"
+  --extra-vars "dkron_image_tag=v4.0.9"
 ```
 
 **Concepto B.1 del reporte (IaC vs gestión de configuración) — guion para tu reflexión:**
@@ -1668,7 +1670,8 @@ mkdir -p infra/modules/cicd
 mkdir -p compose/prometheus compose/alertmanager
 mkdir -p compose/grafana/provisioning/datasources
 mkdir -p compose/grafana/provisioning/dashboards
-mkdir -p compose/grafana/dashboards
+# Nota: el JSON del dashboard vive junto al provider en provisioning/dashboards/,
+# así un único mount (./grafana/provisioning) basta. No hace falta compose/grafana/dashboards.
 
 # Carpetas Ansible (PARTE 6)
 mkdir -p ansible/inventories/prod/group_vars
@@ -2459,9 +2462,9 @@ echo "ECR: $ECR_URL"
 
 aws ecr get-login-password --region us-east-1 \
   | docker login --username AWS --password-stdin "$ECR_URL"
-docker pull dkron/dkron:v3.2.7
-docker tag dkron/dkron:v3.2.7 "$ECR_URL:v3.2.7"
-docker push "$ECR_URL:v3.2.7"
+docker pull dkron/dkron:v4.0.9
+docker tag dkron/dkron:v4.0.9 "$ECR_URL:v4.0.9"
+docker push "$ECR_URL:v4.0.9"
 ```
 
 > En el PARTE 7 esto lo automatiza el pipeline. Aquí lo haces una vez a mano para que ECR no esté vacío cuando levantes la EC2.
@@ -3165,7 +3168,7 @@ aws ec2 describe-instances --instance-ids $(terraform output -raw ec2_instance_i
    │     └── ...                                                        │
    │                                                                    │
    │   Containers después del playbook:                                 │
-   │     • dkron:v3.2.7   :8080  (UI + REST + /metrics)                 │
+   │     • dkron:v4.0.9   :8080  (UI + REST + /metrics)                 │
    │       cmd: "agent --server" → scheduler + executor (9.1bis)        │
    │     • node-exporter  :9100  (métricas del HOST para Prometheus)    │
    └────────────────────────────────────────────────────────────────────┘
@@ -3675,7 +3678,7 @@ ansible-playbook playbooks/deploy.yml --tags deploy
    │                   ▼
    │  ┌─────────────────────────────────────────┐
    │  │        Job 2: replicate-image           │
-   │  │  ─ docker pull dkron/dkron:v3.2.7       │
+   │  │  ─ docker pull dkron/dkron:v4.0.9       │
    │  │  ─ tag → ECR                            │
    │  │  ─ docker push                          │
    │  └────────────────┬────────────────────────┘
@@ -4050,10 +4053,10 @@ jobs:
       - uses: aws-actions/amazon-ecr-login@v2
       - name: Pull, tag, push
         run: |
-          IMG=dkron/dkron:v3.2.7
+          IMG=dkron/dkron:v4.0.9
           docker pull $IMG
-          docker tag $IMG ${{ secrets.ECR_REPO }}:v3.2.7
-          docker push ${{ secrets.ECR_REPO }}:v3.2.7
+          docker tag $IMG ${{ secrets.ECR_REPO }}:v4.0.9
+          docker push ${{ secrets.ECR_REPO }}:v4.0.9
 
   trivy-scan:
     runs-on: ubuntu-latest
@@ -4067,7 +4070,7 @@ jobs:
       - uses: aws-actions/amazon-ecr-login@v2
       - uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ secrets.ECR_REPO }}:v3.2.7
+          image-ref: ${{ secrets.ECR_REPO }}:v4.0.9
           severity: HIGH,CRITICAL
           exit-code: '1'
           ignore-unfixed: true
@@ -4236,7 +4239,9 @@ jobs:
 ### Error 7.B: Trivy bloquea con vulnerabilidades CRITICAL
 **Síntoma:** el scan falla con CVEs.
 **Solución 1:** actualiza la imagen de Dkron a una versión más nueva.
-**Solución 2:** agrega el CVE específico a `.trivyignore` **con justificación documentada en el mismo archivo**:
+**Solución 2:** agrega el CVE específico a `.trivyignore` **con justificación documentada en el mismo archivo**.
+
+> 💡 El archivo `.trivyignore` ya vive en la raíz del repo desde el primer commit, **vacío con solo el header**. Eso evita que la action `aquasecurity/trivy-action` falle por `trivyignores: .trivyignore` apuntando a un archivo inexistente. Cuando aparezca el primer CVE que necesites ignorar, añade el bloque siguiendo el formato de abajo (comentario + CVE).
 
 `.trivyignore` ejemplo:
 ```
@@ -4514,7 +4519,7 @@ infra/modules/monitoring/
 
 ```bash
 mkdir -p infra/modules/monitoring/dashboards
-cp compose/grafana/dashboards/dkron-red.json infra/modules/monitoring/dashboards/dkron-red.json
+cp compose/grafana/provisioning/dashboards/dkron-red.json infra/modules/monitoring/dashboards/dkron-red.json
 ```
 
 Es el **mismo** JSON que ya pegaste en la Parte 3 (sección 3.2). Versionarlo aquí satisface el requisito PDF "dashboards versionados como código".
@@ -5131,7 +5136,7 @@ resource "aws_ssm_parameter" "grafana_dashboard" {
   name  = "/dkron/grafana/dashboard.json"
   type  = "String"
   tier  = "Advanced"
-  value = file("${path.module}/dashboards/dkron-red.json")   # mismo JSON que en compose/grafana/dashboards/
+  value = file("${path.module}/dashboards/dkron-red.json")   # mismo JSON que en compose/grafana/provisioning/dashboards/
 }
 
 # Provider que le dice a Grafana DÓNDE buscar dashboards .json (autoload).
@@ -5266,7 +5271,7 @@ resource "aws_lb_target_group" "grafana" {
 }
 ```
 
-> ℹ️ **Recordatorio:** ya copiaste `compose/grafana/dashboards/dkron-red.json` → `infra/modules/monitoring/dashboards/dkron-red.json` antes de empezar 8.2.0 (es el JSON que `grafana.tf` arriba lee con `file(...)`).
+> ℹ️ **Recordatorio:** ya copiaste `compose/grafana/provisioning/dashboards/dkron-red.json` → `infra/modules/monitoring/dashboards/dkron-red.json` antes de empezar 8.2.0 (es el JSON que `grafana.tf` arriba lee con `file(...)`).
 
 ### Paso 6 — Lambda que traduce webhooks de Alertmanager a SNS
 **`infra/modules/monitoring/lambda_sns.tf`:**
@@ -5943,9 +5948,9 @@ open http://localhost:3000             # Grafana (admin/admin)
    ```
    ECR=$(terraform output -raw ecr_repository_url)
    aws ecr get-login-password | docker login --username AWS --password-stdin $ECR
-   docker pull dkron/dkron:v3.2.7
-   docker tag  dkron/dkron:v3.2.7 $ECR:v3.2.7
-   docker push $ECR:v3.2.7
+   docker pull dkron/dkron:v4.0.9
+   docker tag  dkron/dkron:v4.0.9 $ECR:v4.0.9
+   docker push $ECR:v4.0.9
    ```
 4. Configurar la EC2 con Ansible (bootstrap):
    ```

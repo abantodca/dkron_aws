@@ -1,0 +1,10 @@
+# .trivyignore
+# Justificación de excepciones de Trivy. Cada línea documenta CVE + razón + fecha de revisión.
+# Actualizado: 2026-05-18
+#
+# Formato: una CVE por línea, con comentario inmediatamente arriba.
+# Trivy las ignora SIN cambiar el exit code del scan.
+#
+# Hoy no hay excepciones registradas — si Trivy bloquea con HIGH/CRITICAL,
+# revisa si el CVE tiene fix-upstream (en ese caso, sube versión).
+# Si no tiene fix, documenta aquí con justificación y fecha límite de revisión.

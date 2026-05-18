@@ -31,7 +31,7 @@ variable "azs" {
 
 variable "dkron_image_tag" {
   type        = string
-  default     = "v3.2.7"
+  default     = "v4.0.9"
   description = "Tag de la imagen Dkron a usar (pinneada, NUNCA :latest). Lo consume Ansible vía --extra-vars; Terraform lo declara para que aparezca en terraform.tfvars como única fuente de verdad del proyecto."
 }
 
