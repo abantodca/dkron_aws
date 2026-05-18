@@ -17,7 +17,6 @@ module "compute" {
   project              = var.project
   environment          = var.environment
   vpc_id               = module.network.vpc_id
-  vpc_cidr             = module.network.vpc_cidr
   public_subnet_ids    = module.network.public_subnet_ids
   private_subnet_ids   = module.network.private_subnet_ids
   instance_type        = var.instance_type

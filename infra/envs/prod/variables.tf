@@ -29,6 +29,7 @@ variable "azs" {
   description = "AZs para subnets. ALB requiere mín. 2; resto es single-AZ por costo."
 }
 
+# tflint-ignore: terraform_unused_declarations
 variable "dkron_image_tag" {
   type        = string
   default     = "v4.0.9"
@@ -52,6 +53,7 @@ variable "ssh_allowed_cidrs" {
   description = "CIDRs autorizados a SSH 22 en la EC2. Vacío = SSH cerrado (usa SSM)."
 }
 
+# tflint-ignore: terraform_unused_declarations
 variable "github_repo" {
   type        = string
   description = "GitHub repo (owner/repo). Lo consume bootstrap-oidc.sh y se referencia en el CI vía $${github.repository}. Si NO usas el módulo cicd opcional, esta var queda declarada pero sin uso en Terraform — es OK, sirve para documentar la dependencia en un solo lugar."
