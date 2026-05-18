@@ -1,7 +1,8 @@
 # infra/modules/monitoring/lambda_sns.tf
 
 resource "aws_sns_topic" "alerts" {
-  name = "${var.project}-alerts"
+  name              = "${var.project}-alerts"
+  kms_master_key_id = "alias/aws/sns" # AWS-managed, sin costo de CMK
 }
 
 resource "aws_sns_topic_subscription" "email" {
@@ -33,13 +34,21 @@ data "archive_file" "alertmgr_to_sns" {
   }
 }
 
+# Lambda mínima de glue Alertmanager → SNS. Funciones evitadas a propósito
+# (VPC/DLQ/CMK env/code-signing) — ver .checkov.yaml.
 resource "aws_lambda_function" "alertmgr_to_sns" {
-  function_name    = "${var.project}-alertmgr-to-sns"
-  runtime          = "python3.12"
-  handler          = "index.handler"
-  role             = aws_iam_role.lambda.arn
-  filename         = data.archive_file.alertmgr_to_sns.output_path
-  source_code_hash = data.archive_file.alertmgr_to_sns.output_base64sha256
+  function_name                  = "${var.project}-alertmgr-to-sns"
+  runtime                        = "python3.12"
+  handler                        = "index.handler"
+  role                           = aws_iam_role.lambda.arn
+  filename                       = data.archive_file.alertmgr_to_sns.output_path
+  source_code_hash               = data.archive_file.alertmgr_to_sns.output_base64sha256
+  reserved_concurrent_executions = 5
+
+  tracing_config {
+    mode = "Active"
+  }
+
   environment {
     variables = {
       TOPIC_ARN = aws_sns_topic.alerts.arn
@@ -47,6 +56,8 @@ resource "aws_lambda_function" "alertmgr_to_sns" {
   }
 }
 
+# Function URL pública a propósito — Alertmanager corre en Fargate sin firmar
+# requests; la opacidad de la URL es la única defensa (asumido como tradeoff).
 resource "aws_lambda_function_url" "alertmgr_to_sns" {
   function_name      = aws_lambda_function.alertmgr_to_sns.function_name
   authorization_type = "NONE" # OK porque solo Alertmanager (dentro de la VPC) conoce la URL

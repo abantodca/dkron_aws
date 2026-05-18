@@ -7,6 +7,7 @@ resource "aws_security_group" "prometheus" {
   vpc_id      = var.vpc_id
 
   egress {
+    description = "Scrape EC2 y POST a Lambda Function URL (via NAT)"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
@@ -29,6 +30,7 @@ resource "aws_security_group" "grafana" {
     cidr_blocks = ["0.0.0.0/0"] # el ALB filtra; el SG-alb es restrictivo
   }
   egress {
+    description = "Salida hacia Prometheus (Cloud Map) y registry de plugins"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"

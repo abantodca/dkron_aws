@@ -38,6 +38,7 @@ jobs:
           directory: infra/
           quiet: true
           soft_fail: false
+          config_file: .checkov.yaml
 
   ansible-validate:
     runs-on: ubuntu-latest

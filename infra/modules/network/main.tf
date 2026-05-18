@@ -12,6 +12,12 @@ resource "aws_vpc" "main" {
   tags                 = { Name = "${var.project}-vpc" }
 }
 
+# Restringir el SG por defecto de la VPC (sin ingress/egress) — cierra CKV2_AWS_12.
+resource "aws_default_security_group" "main" {
+  vpc_id = aws_vpc.main.id
+  tags   = { Name = "${var.project}-default-sg-locked" }
+}
+
 # ───── Subnets PÚBLICAS (ALB + NAT viven aquí) ─────
 resource "aws_subnet" "public" {
   count                   = 2

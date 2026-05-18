@@ -2,7 +2,7 @@
 
 resource "aws_ecr_repository" "this" {
   name                 = "${var.project}-${var.name}"
-  image_tag_mutability = "MUTABLE"
+  image_tag_mutability = "IMMUTABLE"
 
   image_scanning_configuration {
     scan_on_push = true
@@ -48,7 +48,7 @@ resource "aws_ecr_lifecycle_policy" "this" {
 # (lookup amazon.aws.aws_ssm '/dkron/prod/image_repo' en ansible/inventories/prod/group_vars/all.yml).
 resource "aws_ssm_parameter" "image_repo" {
   name  = "/${var.project}/prod/image_repo"
-  type  = "String"
+  type  = "SecureString"
   value = aws_ecr_repository.this.repository_url
   tags  = { Name = "${var.project}-image-repo" }
 }

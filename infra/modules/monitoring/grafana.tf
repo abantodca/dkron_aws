@@ -2,7 +2,7 @@
 
 resource "aws_ssm_parameter" "grafana_datasource" {
   name = "/${var.project}/grafana/datasource.yml"
-  type = "String"
+  type = "SecureString"
   value = yamlencode({
     apiVersion = 1
     datasources = [{
@@ -17,7 +17,7 @@ resource "aws_ssm_parameter" "grafana_datasource" {
 
 resource "aws_ssm_parameter" "grafana_dashboard" {
   name  = "/${var.project}/grafana/dashboard.json"
-  type  = "String"
+  type  = "SecureString"
   tier  = "Advanced"
   value = file("${path.module}/dashboards/dkron-red.json")
 }
@@ -25,7 +25,7 @@ resource "aws_ssm_parameter" "grafana_dashboard" {
 # Provider que le dice a Grafana DÓNDE buscar dashboards .json al arrancar.
 resource "aws_ssm_parameter" "grafana_dashboard_provider" {
   name = "/${var.project}/grafana/dashboard_provider.yml"
-  type = "String"
+  type = "SecureString"
   value = yamlencode({
     apiVersion = 1
     providers = [{

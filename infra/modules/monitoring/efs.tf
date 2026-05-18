@@ -58,6 +58,7 @@ resource "aws_security_group" "efs" {
     security_groups = [aws_security_group.prometheus.id, aws_security_group.grafana.id]
   }
   egress {
+    description = "Respuestas NFS hacia tasks (stateful)"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"

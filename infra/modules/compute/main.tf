@@ -23,6 +23,7 @@ resource "aws_security_group" "alb" {
   }
 
   egress {
+    description = "Salida hacia targets (EC2/Fargate) en subnets privadas"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
@@ -58,6 +59,7 @@ resource "aws_security_group" "app" {
   }
 
   egress {
+    description = "Salida a Internet via NAT (ECR pull, dnf, SSM endpoints)"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
@@ -135,10 +137,22 @@ resource "aws_iam_role_policy" "ec2_ssm_read" {
 # Ansible → EC2 vía SSM). NO confundir con el bucket de outputs de jobs.
 data "aws_caller_identity" "current" {}
 
+# Bucket transitorio para payloads SSM de Ansible. No guarda datos persistentes:
+# por eso no aplican replicación cross-region, versionado, access logs, lifecycle,
+# notificaciones ni CMK propio (ver .checkov.yaml).
 resource "aws_s3_bucket" "ansible_ssm" {
   bucket        = "${var.project}-ansible-ssm-${data.aws_caller_identity.current.account_id}"
   force_destroy = true
   tags          = { Name = "${var.project}-ansible-ssm" }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "ansible_ssm" {
+  bucket = aws_s3_bucket.ansible_ssm.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
 }
 
 resource "aws_s3_bucket_public_access_block" "ansible_ssm" {
@@ -173,7 +187,7 @@ resource "aws_iam_role_policy" "ec2_ansible_ssm" {
 # en runtime (mismo patrón que /dkron/prod/image_repo).
 resource "aws_ssm_parameter" "ansible_ssm_bucket" {
   name  = "/${var.project}/${var.environment}/ansible_ssm_bucket"
-  type  = "String"
+  type  = "SecureString"
   value = aws_s3_bucket.ansible_ssm.id
   tags  = { Name = "${var.project}-ansible-ssm-bucket" }
 }
@@ -196,6 +210,8 @@ resource "aws_iam_instance_profile" "ec2" {
 }
 
 # ───── CloudWatch Log Groups ─────
+# Retención corta a propósito: el proyecto se destruye al final del bootcamp.
+# CMK KMS añade ~1 USD/mes por clave; AWS-managed encryption ya está activa por defecto.
 resource "aws_cloudwatch_log_group" "dkron" {
   name              = "/${var.project}/ec2/dkron"
   retention_in_days = 1 # alcance proyecto; prod real: 7-30
@@ -216,6 +232,13 @@ resource "aws_instance" "dkron" {
   key_name                    = aws_key_pair.this.key_name
   associate_public_ip_address = false
   monitoring                  = true
+  ebs_optimized               = true
+
+  metadata_options {
+    http_tokens                 = "required" # IMDSv2 obligatorio
+    http_endpoint               = "enabled"
+    http_put_response_hop_limit = 1
+  }
 
   root_block_device {
     volume_size           = 20
@@ -246,13 +269,17 @@ resource "aws_instance" "dkron" {
 }
 
 # ───── ALB ─────
+# Sin dominio/ACM en este proyecto: el ALB sirve por HTTP plano. WAF y access logs
+# (S3 + CW) se omiten por costo; deletion_protection se omite para permitir destroy
+# limpio al cerrar el laboratorio (skips en .checkov.yaml).
 resource "aws_lb" "this" {
-  name               = "${var.project}-alb"
-  internal           = false
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.alb.id]
-  subnets            = var.public_subnet_ids
-  tags               = { Name = "${var.project}-alb" }
+  name                       = "${var.project}-alb"
+  internal                   = false
+  load_balancer_type         = "application"
+  security_groups            = [aws_security_group.alb.id]
+  subnets                    = var.public_subnet_ids
+  drop_invalid_header_fields = true
+  tags                       = { Name = "${var.project}-alb" }
 }
 
 resource "aws_lb_target_group" "dkron" {
