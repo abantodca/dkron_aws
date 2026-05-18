@@ -163,6 +163,10 @@ resource "aws_ecs_service" "grafana" {
   desired_count   = 1
   launch_type     = "FARGATE"
 
+  # Grafana tarda ~30-45s en arrancar (sqlite migrations, plugin scan). Sin
+  # gracia, el ALB marca unhealthy antes del primer 200 y ECS recicla el task.
+  health_check_grace_period_seconds = 90
+
   network_configuration {
     subnets          = var.private_subnet_ids
     security_groups  = [aws_security_group.grafana.id]
