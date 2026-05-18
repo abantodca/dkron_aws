@@ -10,6 +10,10 @@ permissions:
   id-token: write
   contents: read
 
+concurrency:
+  group: tf-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   destroy:
     if: ${{ inputs.confirmar == 'DESTRUIR' }}
@@ -21,6 +25,29 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: us-east-1
+      - name: Vaciar ECR antes de destroy (defensa en profundidad sobre force_delete)
+        run: |
+          REPO="dkron-dkron"
+          if aws ecr describe-repositories --repository-names "$REPO" --region us-east-1 >/dev/null 2>&1; then
+            IDS=$(aws ecr list-images --repository-name "$REPO" --region us-east-1 --query 'imageIds[*]' --output json)
+            COUNT=$(echo "$IDS" | jq '. | length')
+            if [ "$COUNT" -gt 0 ]; then
+              echo "Eliminando $COUNT imágenes del ECR..."
+              aws ecr batch-delete-image --repository-name "$REPO" --region us-east-1 --image-ids "$IDS"
+            else
+              echo "ECR vacío, nada que limpiar"
+            fi
+          else
+            echo "ECR no existe (ya destruido o nunca creado)"
+          fi
+      - name: Capturar EFS ID del proyecto (para limpiar recovery points después)
+        id: efs
+        run: |
+          EFS_ID=$(aws efs describe-file-systems --region us-east-1 \
+            --query "FileSystems[?Tags[?Key=='Project' && Value=='dkron']].FileSystemId" \
+            --output text | head -1)
+          echo "efs_id=$EFS_ID" >> $GITHUB_OUTPUT
+          echo "EFS ID capturado: '${EFS_ID:-<ninguno>}'"
       - uses: hashicorp/setup-terraform@v3
         with: { terraform_version: 1.10.5 }
       - run: terraform init
@@ -33,3 +60,60 @@ jobs:
           TF_VAR_github_repo:            ${{ github.repository }}
           TF_VAR_alert_email:            ${{ secrets.ALERT_EMAIL }}
           TF_VAR_grafana_admin_password: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+      - name: Borrar log group de Lambda (lo crea AWS automáticamente, no Terraform)
+        if: always()
+        run: |
+          LG="/aws/lambda/dkron-alertmgr-to-sns"
+          if aws logs describe-log-groups --region us-east-1 \
+              --log-group-name-prefix "$LG" \
+              --query "logGroups[?logGroupName=='$LG'].logGroupName" --output text | grep -q "$LG"; then
+            aws logs delete-log-group --region us-east-1 --log-group-name "$LG"
+            echo "Borrado: $LG"
+          else
+            echo "No existía: $LG"
+          fi
+      - name: Borrar recovery points de AWS Backup del EFS destruido
+        if: always() && steps.efs.outputs.efs_id != ''
+        run: |
+          EFS_ID="${{ steps.efs.outputs.efs_id }}"
+          VAULT="Default"
+          echo "Buscando recovery points para EFS $EFS_ID en vault $VAULT..."
+          ARNS=$(aws backup list-recovery-points-by-backup-vault --region us-east-1 \
+            --backup-vault-name "$VAULT" \
+            --query "RecoveryPoints[?contains(ResourceArn, '$EFS_ID')].RecoveryPointArn" \
+            --output text || true)
+          if [ -n "$ARNS" ]; then
+            for arn in $ARNS; do
+              echo "Eliminando: $arn"
+              aws backup delete-recovery-point --region us-east-1 \
+                --backup-vault-name "$VAULT" --recovery-point-arn "$arn"
+            done
+          else
+            echo "Sin recovery points para borrar"
+          fi
+      - name: Verificación post-destroy (qué quedó vivo)
+        if: always()
+        run: |
+          echo "=== CW Log Groups con prefijo /dkron o /aws/lambda/dkron ==="
+          aws logs describe-log-groups --region us-east-1 \
+            --query "logGroups[?starts_with(logGroupName,'/dkron') || starts_with(logGroupName,'/aws/lambda/dkron')].logGroupName" \
+            --output text
+          echo "=== EC2 con tag Project=dkron (running o stopped) ==="
+          aws ec2 describe-instances --region us-east-1 \
+            --filters "Name=tag:Project,Values=dkron" \
+                      "Name=instance-state-name,Values=running,pending,stopping,stopped" \
+            --query 'Reservations[].Instances[].InstanceId' --output text
+          echo "=== ALB del proyecto ==="
+          aws elbv2 describe-load-balancers --region us-east-1 \
+            --query "LoadBalancers[?contains(LoadBalancerName,'dkron')].LoadBalancerName" --output text
+          echo "=== EFS del proyecto ==="
+          aws efs describe-file-systems --region us-east-1 \
+            --query "FileSystems[?Tags[?Key=='Project' && Value=='dkron']].FileSystemId" --output text
+          echo "=== ECR del proyecto ==="
+          aws ecr describe-repositories --region us-east-1 \
+            --query "repositories[?contains(repositoryName,'dkron')].repositoryName" --output text 2>/dev/null || echo "(sin repos)"
+          echo "=== Recovery points EFS en vault Default ==="
+          aws backup list-recovery-points-by-backup-vault --region us-east-1 \
+            --backup-vault-name Default \
+            --query "RecoveryPoints[?contains(ResourceArn,'elasticfilesystem')].{Resource:ResourceArn,Arn:RecoveryPointArn}" \
+            --output table 2>/dev/null || echo "(sin recovery points)"

@@ -3,6 +3,9 @@
 resource "aws_ecr_repository" "this" {
   name                 = "${var.project}-${var.name}"
   image_tag_mutability = "IMMUTABLE"
+  # Permite terraform destroy aún con imágenes presentes. Sin esto AWS rechaza
+  # DeleteRepository con RepositoryNotEmptyException.
+  force_delete = true
 
   image_scanning_configuration {
     scan_on_push = true
