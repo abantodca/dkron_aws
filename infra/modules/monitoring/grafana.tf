@@ -44,8 +44,9 @@ resource "aws_ecs_task_definition" "grafana" {
   requires_compatibilities = ["FARGATE"]
   # Grafana 11.2 recomienda mínimo 1 GB. Con 512 MB hacía OOM kill silencioso
   # durante el boot (sqlite migrate + plugin scan), causando loop initial->drain.
+  # 2 GB da margen para plugins + dashboards sin tocar swap.
   cpu    = "512"
-  memory = "1024"
+  memory = "2048"
 
   execution_role_arn = aws_iam_role.exec.arn
   task_role_arn      = aws_iam_role.task.arn
