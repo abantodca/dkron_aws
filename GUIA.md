@@ -351,7 +351,7 @@ git init
 ```yaml
 services:
   dkron:
-    image: dkron/dkron:v4.0.9
+    image: dkron/dkron:4.1.1
     container_name: dkron-server
     command:
       - agent
@@ -629,11 +629,11 @@ docker ps  # ya sin sudo
 ### Error 3.D: Usaste `dkron/dkron:latest`
 **Síntoma:** todo funciona pero violaste la regla del PDF.
 **Causa:** `latest` no es reproducible.
-**Solución:** cambia a `dkron/dkron:v4.0.9`. Documéntalo en el README ("imagen pinneada a v4.0.9").
+**Solución:** cambia a `dkron/dkron:4.1.1`. Documéntalo en el README ("imagen pinneada a 4.1.1").
 
 ### Error 3.E: La UI carga pero no autentica (versiones recientes de Dkron)
 **Síntoma:** dashboard pide credenciales que no tienes.
-**Solución:** la versión `v4.0.9` no las exige por defecto. Si bajaste otra versión, busca en el changelog si hay flag `--no-auth`.
+**Solución:** la versión `4.1.1` no las exige por defecto. Si bajaste otra versión, busca en el changelog si hay flag `--no-auth`.
 
 ### Error 3.F: `docker compose` te dice "command not found"
 **Síntoma:** `docker compose up` falla.
@@ -711,7 +711,7 @@ Las mismas tres métricas (más `up{job="dkron"}` que añade Prometheus) las pue
 - En AWS (Parte 5-6): vas a tener una **EC2 con Docker Compose configurado por Ansible**. Significa que debajo de los containers tienes una capa adicional ("¿la EC2 tiene Docker instalado?", "¿la versión correcta de docker compose plugin?", "¿el daemon corre con los flags que queremos?"). Esa capa la gestiona Ansible — no Terraform, no el container.
 
 **Lo que vas a defender en el reporte (te lo dejo apuntado):**
-1. Containers eliminan la matriz de "funciona en mi máquina" — la imagen `dkron/dkron:v4.0.9` es bit-a-bit la misma en local y en EC2.
+1. Containers eliminan la matriz de "funciona en mi máquina" — la imagen `dkron/dkron:4.1.1` es bit-a-bit la misma en local y en EC2.
 2. Pero containers **no eliminan** la necesidad de gestión de configuración cuando corres en EC2: sigues teniendo que instalar el motor (Docker), gestionar el `compose.yml`, preocuparte de actualizaciones de seguridad del kernel. Por eso existe Ansible.
 3. ECS Fargate **sí** elimina esa capa intermedia (no hay máquina que configurar). Por eso lo elegimos para Prometheus/Grafana, que son servicios sin estado de aplicación.
 4. La elección "EC2 + Ansible" para Dkron NO es un retroceso pedagógico: es el único camino que te permite **demostrar** la separación IaC↔gestión de configuración en concreto en el reporte (concepto B.1).
@@ -1220,7 +1220,7 @@ Estas las contestas en el **REPORTE.md**. La guía te lleva paso a paso a las re
                        ├─ Trivy scan
                        ├─ Plan (en PRs)
                        ├─ Apply (Terraform en main, gateado por aprobación manual)
-                       └─ Deploy (ansible-playbook deploy.yml — pull imagen + restart compose)
+                       └─ Deploy (ansible-playbook site.yml — bootstrap idempotente + deploy)
 ```
 
 > 📝 **Cómo se mapea esta topología al PDF — para el reporte sección A:**
@@ -1258,13 +1258,13 @@ Estas las contestas en el **REPORTE.md**. La guía te lleva paso a paso a las re
 ## ❓ 2.1 ¿Qué es un container y por qué Docker?
 Un **container** es una caja que empaqueta una aplicación con todo lo que necesita (librerías, runtime, configuración). Lo bueno: corre igual en tu laptop, en AWS o en Marte.
 
-**Imagen** = la receta (`dkron/dkron:v4.0.9`). **Container** = la receta corriendo.
+**Imagen** = la receta (`dkron/dkron:4.1.1`). **Container** = la receta corriendo.
 
 **Regla del bootcamp:** NO se permite hacer fork de Dkron ni modificar su código. Usa la imagen oficial.
 
 > 📝 **Nota sobre la licencia de Dkron — para tu reporte sección A:** Dkron está liberado bajo **LGPL-3.0**. El PDF (final de sección 2, "Si se propone una aplicación distinta") exige licencia permisiva (MIT/Apache 2.0/BSD/MPL 2.0) **solo si propones una aplicación distinta** a las cuatro recomendadas. Como Dkron ES una de las recomendadas explícitamente por el bootcamp (Caso D), su licencia ya fue validada por el material y no necesitas justificarla. LGPL-3.0 es weak copyleft: nos cubre porque (a) no modificamos el código de Dkron — lo operamos como container; (b) no enlazamos estáticamente con su código en nuestros propios binarios. Si el evaluador pregunta, esa es la respuesta corta.
 
-**Práctica fundamental:** **pinnea** la versión. NUNCA uses `:latest`. Usa `dkron/dkron:v4.0.9`. Si usas `latest`, mañana puede cambiar y producción rompe sin que nadie lo decida.
+**Práctica fundamental:** **pinnea** la versión. NUNCA uses `:latest`. Usa `dkron/dkron:4.1.1`. Si usas `latest`, mañana puede cambiar y producción rompe sin que nadie lo decida.
 
 ### 🧠 Analogía: Docker es como una caja de Lego prearmada
 Si tu programa es un castillo, sin Docker tienes que armar el castillo cada vez en cada laptop. Con Docker, alguien armó el castillo, lo metió en una caja sellada (imagen), y tú solo "abres la caja" (`docker run`) en cualquier máquina con Docker.
@@ -1366,9 +1366,9 @@ Plataforma lateral: ECR (mirror) · CloudWatch Logs · SSM Parameter Store
 **ECR (Elastic Container Registry)** es Docker Hub privado de AWS. La sección 3 dice: **replica la imagen oficial de Dkron a tu ECR**. Razón: si Docker Hub se cae o cambian políticas, tu producción no depende de un tercero.
 
 ```bash
-docker pull dkron/dkron:v4.0.9
-docker tag dkron/dkron:v4.0.9 123456789.dkr.ecr.us-east-1.amazonaws.com/dkron:v4.0.9
-docker push 123456789.dkr.ecr.us-east-1.amazonaws.com/dkron:v4.0.9
+docker pull dkron/dkron:4.1.1
+docker tag dkron/dkron:4.1.1 123456789.dkr.ecr.us-east-1.amazonaws.com/dkron:4.1.1
+docker push 123456789.dkr.ecr.us-east-1.amazonaws.com/dkron:4.1.1
 ```
 
 Esto lo automatizarás en el pipeline.
@@ -1435,7 +1435,7 @@ Un **firewall virtual** alrededor de un recurso. Define qué puertos están abie
 ```bash
 cd ansible
 ansible-playbook -i inventories/prod/aws_ec2.yml playbooks/deploy.yml \
-  --extra-vars "dkron_image_tag=v4.0.9"
+  --extra-vars "dkron_image_tag=4.1.1"
 ```
 
 **Concepto B.1 del reporte (IaC vs gestión de configuración) — guion para tu reflexión:**
@@ -2029,7 +2029,7 @@ variable "azs" {
 
 variable "dkron_image_tag" {
   type        = string
-  default     = "v4.0.9"
+  default     = "4.1.1"
   description = "Tag de la imagen Dkron a usar (pinneada, NUNCA :latest). Lo consume Ansible vía --extra-vars; Terraform lo declara para que aparezca en terraform.tfvars como única fuente de verdad del proyecto."
 }
 
@@ -2371,7 +2371,10 @@ variable "name" {
 
 resource "aws_ecr_repository" "this" {
   name                 = "${var.project}-${var.name}"
-  image_tag_mutability = "MUTABLE"
+  image_tag_mutability = "IMMUTABLE"
+  # Permite `terraform destroy` aún con imágenes presentes. Sin esto AWS rechaza
+  # DeleteRepository con RepositoryNotEmptyException y deja recursos colgando.
+  force_delete = true
 
   image_scanning_configuration {
     scan_on_push = true
@@ -2462,9 +2465,9 @@ echo "ECR: $ECR_URL"
 
 aws ecr get-login-password --region us-east-1 \
   | docker login --username AWS --password-stdin "$ECR_URL"
-docker pull dkron/dkron:v4.0.9
-docker tag dkron/dkron:v4.0.9 "$ECR_URL:v4.0.9"
-docker push "$ECR_URL:v4.0.9"
+docker pull dkron/dkron:4.1.1
+docker tag dkron/dkron:4.1.1 "$ECR_URL:4.1.1"
+docker push "$ECR_URL:4.1.1"
 ```
 
 > En el PARTE 7 esto lo automatiza el pipeline. Aquí lo haces una vez a mano para que ECR no esté vacío cuando levantes la EC2.
@@ -2485,7 +2488,7 @@ docker push "$ECR_URL:v4.0.9"
 **Por qué lo quitamos — descubrimiento real en producción (ver PARTE 11.2):**
 
 1. **Dkron OSS v4 no soporta backend Postgres.** Los flags `--store=postgres`, `--backend=postgres` y `--dsn=...` **solo existen en Dkron Pro** (la versión comercial). El binario OSS no reconoce esos flags: imprime el listado completo de opciones de `agent --help` y sale con código 1. El container queda en `Restarting (1)` infinito.
-2. Verificación directa: `docker run --rm dkron/dkron:v4.0.9 agent --help | grep -iE 'store|backend|dsn|postgres'` devuelve **vacío**. Ninguno de esos flags existe en el binario OSS.
+2. Verificación directa: `docker run --rm dkron/dkron:4.1.1 agent --help | grep -iE 'store|backend|dsn|postgres'` devuelve **vacío**. Ninguno de esos flags existe en el binario OSS.
 3. Resultado: gastábamos ~$15/mes de RDS + un SecureString + un SG + 5 minutos de apply en algo que el binario nunca iba a usar.
 
 **Qué hicimos en su lugar — BoltDB embebido sobre EBS:**
@@ -3168,7 +3171,7 @@ aws ec2 describe-instances --instance-ids $(terraform output -raw ec2_instance_i
    │     └── ...                                                        │
    │                                                                    │
    │   Containers después del playbook:                                 │
-   │     • dkron:v4.0.9   :8080  (UI + REST + /metrics)                 │
+   │     • dkron:4.1.1   :8080  (UI + REST + /metrics)                 │
    │       cmd: "agent --server" → scheduler + executor (9.1bis)        │
    │     • node-exporter  :9100  (métricas del HOST para Prometheus)    │
    └────────────────────────────────────────────────────────────────────┘
@@ -3254,7 +3257,7 @@ environment: prod
 region: us-east-1
 
 # Versiones pinneadas (espejo de las que pinnearás en docker-compose)
-dkron_image_tag: "v4.0.9"
+dkron_image_tag: "4.1.1"
 node_exporter_image_tag: "v1.8.2"
 
 # Lookups a SSM (Ansible los resuelve EN TIEMPO DE EJECUCIÓN, no se versionan)
@@ -3327,8 +3330,11 @@ docker_compose_plugin_version: "v2.29.7"
       - "docker>=7.1"
       - "PyYAML"
     state: present
-  # OJO: NO uses --ignore-installed aquí. Si lo agregas, pip sobreescribe
-  # archivos del urllib3 del sistema y rompe el awscli (ver PARTE 11.1).
+    # --ignore-installed evita que pip intente desinstalar requests/urllib3 del rpm
+    # (sin RECORD file). La integridad del rpm se repara en el bloque de abajo.
+    # Sin esto, en AL2023 cruda falla: "Cannot uninstall requests 2.25.1, RECORD
+    # file not found. Hint: The package was installed by rpm."
+    extra_args: --ignore-installed
 
 - name: Verificar integridad de python3-urllib3 (pip puede haber sobrescrito sus archivos y roto awscli)
   ansible.builtin.command: rpm -V python3-urllib3
@@ -3678,7 +3684,7 @@ ansible-playbook playbooks/deploy.yml --tags deploy
    │                   ▼
    │  ┌─────────────────────────────────────────┐
    │  │        Job 2: replicate-image           │
-   │  │  ─ docker pull dkron/dkron:v4.0.9       │
+   │  │  ─ docker pull dkron/dkron:4.1.1       │
    │  │  ─ tag → ECR                            │
    │  │  ─ docker push                          │
    │  └────────────────┬────────────────────────┘
@@ -3712,7 +3718,7 @@ ansible-playbook playbooks/deploy.yml --tags deploy
    │                          │  ─ pip install ansible  │
    │                          │  ─ inventario aws_ec2   │
    │                          │  ─ ansible-playbook     │
-   │                          │       deploy.yml        │
+   │                          │       site.yml          │
    │                          │  ─ smoke test al ALB    │
    │                          └─────────────────────────┘
 
@@ -3724,7 +3730,9 @@ ansible-playbook playbooks/deploy.yml --tags deploy
 
 **Por qué este flujo es Continuous Delivery (no Deployment):** porque hay un **humano** que aprueba antes del apply de Terraform. En Continuous Deployment puro, el apply correría solo. El bootcamp pide delivery (sección 5.3 punto 5).
 
-**Nota sobre la gate manual y Ansible:** una vez que el humano aprueba, **tanto** `terraform apply` como `ansible-playbook deploy.yml` corren automáticos. La aprobación se aplica al deploy completo (infra + config). No metemos otra gate antes de Ansible porque en este flujo Ansible es la ejecución del deploy, no una decisión adicional.
+**Nota sobre la gate manual y Ansible:** una vez que el humano aprueba, **tanto** `terraform apply` como `ansible-playbook site.yml` corren automáticos. La aprobación se aplica al deploy completo (infra + config). No metemos otra gate antes de Ansible porque en este flujo Ansible es la ejecución del deploy, no una decisión adicional.
+
+> 📝 **¿Por qué el workflow ejecuta `site.yml` y no `deploy.yml`?** `site.yml` es idempotente: la primera vez sobre una EC2 cruda instala Docker + Compose v2 + Dkron; las siguientes solo redeploya el compose. Si usábamos `deploy.yml`, fallaba en la primera ejecución porque asumía Docker ya instalado (el `user_data` del EC2 sólo trae SSM agent + Python).
 
 ## ❓ 7.1 ¿Cómo le doy a GitHub Actions credenciales de AWS sin meter secretos en el código?
 
@@ -4013,6 +4021,7 @@ jobs:
           directory: infra/
           quiet: true
           soft_fail: false
+          config_file: .checkov.yaml
 
   ansible-validate:
     runs-on: ubuntu-latest
@@ -4020,26 +4029,27 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      # Creds AWS: el inventory aws_ec2.yml usa plugin amazon.aws.aws_ec2 + lookups SSM
-      # que necesitan credenciales incluso para --syntax-check (Ansible evalúa el
-      # inventory antes de parsear los playbooks).
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: us-east-1
-      - name: Install ansible-lint, yamllint y boto3 (lookups AWS)
+      - name: Install ansible-lint y yamllint
         run: |
-          pip install "ansible-core==2.17.*" "ansible-lint==24.7.*" "yamllint==1.35.*" "boto3>=1.34" "botocore>=1.34"
+          pip install "ansible-core==2.17.*" "ansible-lint==24.7.*" "yamllint==1.35.*"
           ansible-galaxy collection install -r ansible/requirements.yml
       - name: yamllint
         run: yamllint ansible/
       - name: ansible-lint
+        # ANSIBLE_CONFIG/ROLES_PATH para que el syntax-check interno de
+        # ansible-lint resuelva los roles referenciados en playbooks/site.yml
+        # (ansible.cfg vive en ansible/, no en la raíz del repo).
+        env:
+          ANSIBLE_CONFIG: ansible/ansible.cfg
+          ANSIBLE_ROLES_PATH: ansible/roles
         run: ansible-lint ansible/
       - name: Syntax check de los playbooks
+        # Inventory dummy: evitamos cargar aws_ec2.yml (plugin amazon.aws.aws_ec2 +
+        # lookups SSM) que requeriría credenciales AWS sólo para parsear sintaxis.
         working-directory: ansible
         run: |
-          ansible-playbook playbooks/site.yml --syntax-check -i inventories/prod/aws_ec2.yml
-          ansible-playbook playbooks/deploy.yml --syntax-check -i inventories/prod/aws_ec2.yml
+          ansible-playbook playbooks/site.yml   --syntax-check -i localhost,
+          ansible-playbook playbooks/deploy.yml --syntax-check -i localhost,
 
   replicate-image:
     runs-on: ubuntu-latest
@@ -4053,10 +4063,10 @@ jobs:
       - uses: aws-actions/amazon-ecr-login@v2
       - name: Pull, tag, push
         run: |
-          IMG=dkron/dkron:v4.0.9
+          IMG=dkron/dkron:4.1.1
           docker pull $IMG
-          docker tag $IMG ${{ secrets.ECR_REPO }}:v4.0.9
-          docker push ${{ secrets.ECR_REPO }}:v4.0.9
+          docker tag $IMG ${{ secrets.ECR_REPO }}:4.1.1
+          docker push ${{ secrets.ECR_REPO }}:4.1.1
 
   trivy-scan:
     runs-on: ubuntu-latest
@@ -4070,7 +4080,7 @@ jobs:
       - uses: aws-actions/amazon-ecr-login@v2
       - uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ secrets.ECR_REPO }}:v4.0.9
+          image-ref: ${{ secrets.ECR_REPO }}:4.1.1
           severity: HIGH,CRITICAL
           exit-code: '1'
           ignore-unfixed: true
@@ -4105,8 +4115,10 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     environment: production
     outputs:
-      ec2_instance_id: ${{ steps.tf.outputs.ec2_instance_id }}
-      alb_dns_name:    ${{ steps.tf.outputs.alb_dns_name }}
+      ec2_instance_id:     ${{ steps.tf.outputs.ec2_instance_id }}
+      alb_dns_name:        ${{ steps.tf.outputs.alb_dns_name }}
+      grafana_url:         ${{ steps.tf.outputs.grafana_url }}
+      lambda_function_url: ${{ steps.tf.outputs.lambda_function_url }}
     steps:
       - uses: actions/checkout@v4
       - uses: aws-actions/configure-aws-credentials@v4
@@ -4128,8 +4140,10 @@ jobs:
           TF_VAR_grafana_admin_password: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
         run: |
           terraform apply -auto-approve
-          echo "ec2_instance_id=$(terraform output -raw ec2_instance_id)" >> $GITHUB_OUTPUT
-          echo "alb_dns_name=$(terraform output -raw alb_dns_name)"       >> $GITHUB_OUTPUT
+          echo "ec2_instance_id=$(terraform output -raw ec2_instance_id)"         >> $GITHUB_OUTPUT
+          echo "alb_dns_name=$(terraform output -raw alb_dns_name)"               >> $GITHUB_OUTPUT
+          echo "grafana_url=$(terraform output -raw grafana_url)"                 >> $GITHUB_OUTPUT
+          echo "lambda_function_url=$(terraform output -raw lambda_function_url)" >> $GITHUB_OUTPUT
 
   ansible-deploy:
     runs-on: ubuntu-latest
@@ -4163,10 +4177,13 @@ jobs:
           echo "EC2 no quedó Online en SSM tras 5 minutos"
           exit 1
       - name: Deploy con ansible-playbook
+        # site.yml es idempotente: la 1ª vez instala Docker+Compose+Dkron;
+        # las siguientes solo redeploya. deploy.yml asumía Docker ya instalado
+        # y fallaba en la 1ª ejecución sobre EC2 cruda.
         working-directory: ansible
         run: |
-          ansible-playbook playbooks/deploy.yml \
-            --extra-vars "dkron_image_tag=v4.0.9"
+          ansible-playbook playbooks/site.yml \
+            --extra-vars "dkron_image_tag=4.1.1"
       - name: Smoke test desde el ALB
         run: |
           ALB="${{ needs.apply.outputs.alb_dns_name }}"
@@ -4177,6 +4194,25 @@ jobs:
           done
           echo "ALB nunca devolvió 200 tras 200s"
           exit 1
+      - name: Publicar URLs accesibles
+        if: success()
+        env:
+          ALB:    ${{ needs.apply.outputs.alb_dns_name }}
+          GRAF:   ${{ needs.apply.outputs.grafana_url }}
+          LAMBDA: ${{ needs.apply.outputs.lambda_function_url }}
+        run: |
+          {
+            echo "## URLs del despliegue"
+            echo ""
+            echo "| Servicio | URL |"
+            echo "|---|---|"
+            echo "| Dkron UI | http://$ALB/ |"
+            echo "| Dkron API (jobs) | http://$ALB/v1/jobs |"
+            echo "| Grafana | $GRAF |"
+            echo "| Alertmanager → SNS (Lambda URL) | $LAMBDA |"
+            echo ""
+            echo "**Login Grafana:** usuario \`admin\`, password = secret \`GRAFANA_ADMIN_PASSWORD\` del repo."
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 ```
 
 > Secrets necesarios en GitHub (los **6**): `AWS_ROLE_ARN`, `ECR_REPO`, `TF_OWNER`, `SSH_PUBLIC_KEY`, `ALERT_EMAIL`, `GRAFANA_ADMIN_PASSWORD`. Si te falta cualquiera, `terraform plan` revienta con `No value for required variable`. **Ya no hay `DB_PASSWORD`** — al eliminar el módulo storage (BoltDB local, ver PARTE 5.4) desapareció esa variable.
@@ -4196,6 +4232,10 @@ permissions:
   id-token: write
   contents: read
 
+concurrency:
+  group: tf-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   destroy:
     if: ${{ inputs.confirmar == 'DESTRUIR' }}
@@ -4207,6 +4247,29 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: us-east-1
+      - name: Vaciar ECR antes de destroy (defensa en profundidad sobre force_delete)
+        run: |
+          REPO="dkron-dkron"
+          if aws ecr describe-repositories --repository-names "$REPO" --region us-east-1 >/dev/null 2>&1; then
+            IDS=$(aws ecr list-images --repository-name "$REPO" --region us-east-1 --query 'imageIds[*]' --output json)
+            COUNT=$(echo "$IDS" | jq '. | length')
+            if [ "$COUNT" -gt 0 ]; then
+              echo "Eliminando $COUNT imágenes del ECR..."
+              aws ecr batch-delete-image --repository-name "$REPO" --region us-east-1 --image-ids "$IDS"
+            else
+              echo "ECR vacío, nada que limpiar"
+            fi
+          else
+            echo "ECR no existe (ya destruido o nunca creado)"
+          fi
+      - name: Capturar EFS ID del proyecto (para limpiar recovery points después)
+        id: efs
+        run: |
+          EFS_ID=$(aws efs describe-file-systems --region us-east-1 \
+            --query "FileSystems[?Tags[?Key=='Project' && Value=='dkron']].FileSystemId" \
+            --output text | head -1)
+          echo "efs_id=$EFS_ID" >> $GITHUB_OUTPUT
+          echo "EFS ID capturado: '${EFS_ID:-<ninguno>}'"
       - uses: hashicorp/setup-terraform@v3
         with: { terraform_version: 1.10.5 }
       - run: terraform init
@@ -4219,7 +4282,71 @@ jobs:
           TF_VAR_github_repo:            ${{ github.repository }}
           TF_VAR_alert_email:            ${{ secrets.ALERT_EMAIL }}
           TF_VAR_grafana_admin_password: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+      - name: Borrar log group de Lambda (lo crea AWS automáticamente, no Terraform)
+        if: always()
+        run: |
+          LG="/aws/lambda/dkron-alertmgr-to-sns"
+          if aws logs describe-log-groups --region us-east-1 \
+              --log-group-name-prefix "$LG" \
+              --query "logGroups[?logGroupName=='$LG'].logGroupName" --output text | grep -q "$LG"; then
+            aws logs delete-log-group --region us-east-1 --log-group-name "$LG"
+            echo "Borrado: $LG"
+          else
+            echo "No existía: $LG"
+          fi
+      - name: Borrar recovery points de AWS Backup del EFS destruido
+        if: always() && steps.efs.outputs.efs_id != ''
+        run: |
+          EFS_ID="${{ steps.efs.outputs.efs_id }}"
+          VAULT="Default"
+          echo "Buscando recovery points para EFS $EFS_ID en vault $VAULT..."
+          ARNS=$(aws backup list-recovery-points-by-backup-vault --region us-east-1 \
+            --backup-vault-name "$VAULT" \
+            --query "RecoveryPoints[?contains(ResourceArn, '$EFS_ID')].RecoveryPointArn" \
+            --output text || true)
+          if [ -n "$ARNS" ]; then
+            for arn in $ARNS; do
+              echo "Eliminando: $arn"
+              aws backup delete-recovery-point --region us-east-1 \
+                --backup-vault-name "$VAULT" --recovery-point-arn "$arn"
+            done
+          else
+            echo "Sin recovery points para borrar"
+          fi
+      - name: Verificación post-destroy (qué quedó vivo)
+        if: always()
+        run: |
+          echo "=== CW Log Groups con prefijo /dkron o /aws/lambda/dkron ==="
+          aws logs describe-log-groups --region us-east-1 \
+            --query "logGroups[?starts_with(logGroupName,'/dkron') || starts_with(logGroupName,'/aws/lambda/dkron')].logGroupName" \
+            --output text
+          echo "=== EC2 con tag Project=dkron (running o stopped) ==="
+          aws ec2 describe-instances --region us-east-1 \
+            --filters "Name=tag:Project,Values=dkron" \
+                      "Name=instance-state-name,Values=running,pending,stopping,stopped" \
+            --query 'Reservations[].Instances[].InstanceId' --output text
+          echo "=== ALB del proyecto ==="
+          aws elbv2 describe-load-balancers --region us-east-1 \
+            --query "LoadBalancers[?contains(LoadBalancerName,'dkron')].LoadBalancerName" --output text
+          echo "=== EFS del proyecto ==="
+          aws efs describe-file-systems --region us-east-1 \
+            --query "FileSystems[?Tags[?Key=='Project' && Value=='dkron']].FileSystemId" --output text
+          echo "=== ECR del proyecto ==="
+          aws ecr describe-repositories --region us-east-1 \
+            --query "repositories[?contains(repositoryName,'dkron')].repositoryName" --output text 2>/dev/null || echo "(sin repos)"
+          echo "=== Recovery points EFS en vault Default ==="
+          aws backup list-recovery-points-by-backup-vault --region us-east-1 \
+            --backup-vault-name Default \
+            --query "RecoveryPoints[?contains(ResourceArn,'elasticfilesystem')].{Resource:ResourceArn,Arn:RecoveryPointArn}" \
+            --output table 2>/dev/null || echo "(sin recovery points)"
 ```
+
+**Por qué los steps extra de cleanup:** `terraform destroy` solo elimina lo que TF gestiona. Hay 3 categorías de recursos AWS que sobreviven sin esto:
+1. **ECR con imágenes** (necesita `force_delete = true` en el resource + idempotencia del `batch-delete-image` por si el state aún no tiene el flag).
+2. **Log group de Lambda `/aws/lambda/dkron-alertmgr-to-sns`** (AWS lo crea automáticamente al primer invoke, no TF).
+3. **Recovery points de AWS Backup del EFS** (AWS Backup default cubre EFS automáticamente; los snapshots sobreviven al destroy del file system).
+
+El step final lista lo que quedó vivo para verificación. **Lo que se conserva por diseño** y no se toca: bucket S3 del state, OIDC provider, rol `github-actions-dkron` — todos necesarios para volver a desplegar.
 
 ## ❓ 7.5 ¿Cómo pruebo el pipeline?
 1. Crea una rama: `git checkout -b feat/test-pipeline`.
@@ -4241,22 +4368,34 @@ jobs:
 **Solución 1:** actualiza la imagen de Dkron a una versión más nueva.
 **Solución 2:** agrega el CVE específico a `.trivyignore` **con justificación documentada en el mismo archivo**.
 
-> 💡 El archivo `.trivyignore` ya vive en la raíz del repo desde el primer commit, **vacío con solo el header**. Eso evita que la action `aquasecurity/trivy-action` falle por `trivyignores: .trivyignore` apuntando a un archivo inexistente. Cuando aparezca el primer CVE que necesites ignorar, añade el bloque siguiendo el formato de abajo (comentario + CVE).
+> 💡 El archivo `.trivyignore` vive en la raíz del repo. Al pasar a producción identificamos 5 CVEs HIGH del Go stdlib en `dkron/dkron:4.1.1` (sin fix sin rebuild upstream de Dkron) que están whitelisted con justificación + fecha de revisión.
 
-`.trivyignore` ejemplo:
+`.trivyignore` actual del repo:
 ```
-# Justificación de excepciones — actualizado 2026-MM-DD
-# Cada línea documenta CVE + razón + fecha de revisión
+# .trivyignore
+# Justificación de excepciones de Trivy. Cada línea documenta CVE + razón + fecha de revisión.
+# Actualizado: 2026-05-18
+#
+# Formato: una CVE por línea, con comentario inmediatamente arriba.
+# Trivy las ignora SIN cambiar el exit code del scan.
 
-# CVE en runtime de Go de la imagen oficial. Sin parche upstream
-# disponible al 2026-05-10. Riesgo aceptado por estar la imagen
-# en subnet privada y no ser afectada por el vector de ataque
-# (requeriría acceso de red local). Revisar en 30 días.
-CVE-2023-39325
+# ─── CVEs HIGH del Go stdlib en dkron/dkron:4.1.1 (Go 1.26.2) ───────────────
+# Aceptadas porque:
+#   - Son DoS, no RCE.
+#   - 4.1.1 es la última versión publicada por upstream (2026-05-12).
+#   - Fix requiere rebuild upstream con Go >= 1.26.3.
+# Fecha de revisión: 2026-08-16. Si Dkron publica 4.1.2+, sube versión y borra estas líneas.
 
-# Vulnerabilidad en libpng dentro de la imagen base. No usado
-# por Dkron en runtime. Riesgo nulo. Revisar al actualizar imagen.
-CVE-2023-4863
+# DoS CNAME lookup (cgo DNS resolver con CNAMEs muy largos)
+CVE-2026-33811
+# DoS HTTP/2 SETTINGS frames (transport entra en loop infinito)
+CVE-2026-33814
+# DoS net/mail ParseAddress / ParseAddressList con inputs craftados
+CVE-2026-39820
+# DoS Dial/LookupPort con NUL byte (Windows-only, no aplica a runner Linux)
+CVE-2026-39836
+# DoS consumePhrase parser con inputs patológicos
+CVE-2026-42499
 ```
 
 **Esto NO es un atajo:** la sección 5.3 punto 3 del PDF dice "el job falla si hay vulnerabilidades HIGH o CRITICAL **sin excepción documentada**". La excepción documentada está permitida. Documéntalo también en `REPORTE.md` sección C como "problema encontrado y solución aplicada".
@@ -4484,7 +4623,7 @@ Vamos a crear **dos servicios ECS adicionales** en la misma VPC privada, con **E
 | `aws_iam_role.lambda` + policies | 🔐 IAM | **IAM → Roles → Create role** → Use case: **Lambda** → Role name: `dkron-alertmgr-lambda` → Attach managed: `AWSLambdaBasicExecutionRole` → **Create inline policy**: `sns:Publish` sobre el ARN del topic `dkron-alerts`. |
 | `aws_ecs_task_definition.prometheus` | 🐳 ECS | **ECS → Task definitions → Create new task definition** → Family: `dkron-prometheus` → Launch type: **Fargate** → CPU: 0.25 vCPU, Memory: 0.5 GB → Execution role: `dkron-obs-exec`, Task role: `dkron-obs-task` → Containers: `config-init` (essential=false, `dependsOn=null`, lee SSM con awscli) + `prometheus:v2.54.1` (essential=true, `dependsOn config-init=SUCCESS`, puerto 9090) + `alertmanager:v0.27.0` (essential=true, puerto 9093) → Volume EFS `prom-data` con `transit_encryption=ENABLED` y access point `prometheus`. |
 | `aws_ecs_service.prometheus` | 🐳 ECS | En el cluster `dkron-obs` → **Services → Create** → Launch type: FARGATE → Task definition: `dkron-prometheus` → Service name: `prometheus` → Desired count: 1 → Network: subnets **privadas**, SG `dkron-prom-sg`, **Assign public IP: DISABLED** → Service discovery: registra al servicio Cloud Map `prometheus.dkron.local`. |
-| `aws_ecs_task_definition.grafana` | 🐳 ECS | **Task definitions → Create** → Family: `dkron-grafana` → Fargate, 0.25 vCPU / 0.5 GB → Execution+Task role: `dkron-obs-exec/task` → Containers: (a) `config-init` (`amazon/aws-cli:2.15.0`, essential=false, hace `aws ssm get-parameter` de datasource + dashboard_provider + dashboard.json y los escribe a `/var/lib/grafana/provisioning/{datasources,dashboards}/` y `/var/lib/grafana/dashboards/`) + (b) `grafana:11.2.0` (essential=true, `dependsOn config-init=SUCCESS`, port 3000) con env vars `GF_SECURITY_ADMIN_USER=admin`, `GF_USERS_ALLOW_SIGN_UP=false`, `GF_AUTH_ANONYMOUS_ENABLED=false`, **`GF_PATHS_PROVISIONING=/var/lib/grafana/provisioning`** y **secret** `GF_SECURITY_ADMIN_PASSWORD` desde el SSM SecureString `dkron-graf-pass` → Volume EFS `graf-data` con access point `grafana`. |
+| `aws_ecs_task_definition.grafana` | 🐳 ECS | **Task definitions → Create** → Family: `dkron-grafana` → Fargate, **0.5 vCPU / 2 GB** (mínimo 1 GB; con 0.5 GB hay OOM kill silencioso al boot) → Execution+Task role: `dkron-obs-exec/task` → Containers: (a) `config-init` (`amazon/aws-cli:2.15.0`, essential=false, `entryPoint = ["/bin/sh", "-c"]` para sobreescribir el ENTRYPOINT del Dockerfile, hace `aws ssm get-parameter --with-decryption` de datasource + dashboard_provider + dashboard.json - son SecureString) + (b) `grafana:11.2.0` (essential=true, `dependsOn config-init=SUCCESS`, port 3000) con env vars `GF_SECURITY_ADMIN_USER=admin`, `GF_USERS_ALLOW_SIGN_UP=false`, `GF_AUTH_ANONYMOUS_ENABLED=false`, **`GF_PATHS_PROVISIONING=/var/lib/grafana/provisioning`** y **secret** `GF_SECURITY_ADMIN_PASSWORD` desde el SSM SecureString `dkron-graf-pass` → Volume EFS `graf-data` con access point `grafana` → **Service** con `health_check_grace_period_seconds = 90` (sin esto, ALB recicla antes de que Grafana termine de arrancar). |
 | `aws_ecs_service.grafana` | 🐳 ECS | **Services → Create** → Task definition: `dkron-grafana` → Desired count: 1 → Network: subnets privadas, SG `dkron-graf-sg` → Load balancing: ALB existente `dkron-alb`, target group `dkron-grafana`, container `grafana`, port 3000. |
 | `aws_lb_target_group.grafana` | ⚖️ EC2 | **EC2 → Target groups → Create target group** → Target type: **IP addresses** (Fargate awsvpc) → Name: `dkron-grafana` → Protocol HTTP, Port 3000 → VPC: dkron-vpc → Health check path: `/api/health`, matcher 200. |
 | `aws_lb_listener.grafana` | ⚖️ EC2 | En el ALB `dkron-alb` → **Listeners → Add listener** → Protocol HTTP, Port **3000** → Default action: Forward → Target group `dkron-grafana` → Add. |
@@ -4630,6 +4769,36 @@ resource "aws_iam_role_policy" "task_efs" {
   })
 }
 
+# El container config-init invoca `aws ssm get-parameter` en runtime, lo cual
+# usa el TASK role (no el execution role). La policy del execution role solo
+# cubre los `secrets`/`valueFrom` que ECS agent resuelve antes de arrancar.
+#
+# kms:Decrypt va en un statement aparte: el resource es la KMS key, no el
+# parameter SSM, así que aplicarlo al ARN de SSM era un implicit-deny.
+resource "aws_iam_role_policy" "task_ssm" {
+  role = aws_iam_role.task.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["ssm:GetParameter", "ssm:GetParameters"]
+        Resource = "arn:aws:ssm:${var.region}:*:parameter/${var.project}/*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt"]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "kms:ViaService" = "ssm.${var.region}.amazonaws.com"
+          }
+        }
+      }
+    ]
+  })
+}
+
 # ───── Lambda role (Alertmanager → SNS) ─────
 data "aws_iam_policy_document" "lambda_assume" {
   statement {
@@ -4714,6 +4883,19 @@ resource "aws_security_group_rule" "app_from_prom_9100" {
   protocol                 = "tcp"
   security_group_id        = var.app_security_group_id
   source_security_group_id = aws_security_group.prometheus.id
+}
+
+# Grafana consulta Prometheus vía Cloud Map (prometheus.${project}.local:9090).
+# El SG-prom no tiene ingress propio (solo egress); la regla cross-SG vive aquí
+# para no acoplar la definición del SG con quién lo consume.
+resource "aws_security_group_rule" "prom_from_graf_9090" {
+  type                     = "ingress"
+  description              = "Grafana queries Prometheus"
+  from_port                = 9090
+  to_port                  = 9090
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.prometheus.id
+  source_security_group_id = aws_security_group.grafana.id
 }
 ```
 
@@ -5026,7 +5208,7 @@ resource "aws_ecs_task_definition" "prometheus" {
   volume {
     name = "prom-data"
     efs_volume_configuration {
-      file_system_id = aws_efs_file_system.obs.id
+      file_system_id     = aws_efs_file_system.obs.id
       transit_encryption = "ENABLED"
       authorization_config { access_point_id = aws_efs_access_point.prometheus.id, iam = "ENABLED" }
     }
@@ -5037,13 +5219,17 @@ resource "aws_ecs_task_definition" "prometheus" {
       name      = "config-init"
       image     = "amazon/aws-cli:2.15.0"
       essential = false
-      command = ["sh", "-c", <<-EOT
-        mkdir -p /etc/prometheus/targets
-        aws ssm get-parameter --name /dkron/prometheus/prometheus.yml --query Parameter.Value --output text > /etc/prometheus/prometheus.yml
-        aws ssm get-parameter --name /dkron/prometheus/rules.yml      --query Parameter.Value --output text > /etc/prometheus/rules.yml
-        aws ssm get-parameter --name /dkron/prometheus/targets/dkron.json      --query Parameter.Value --output text > /etc/prometheus/targets/dkron.json
-        aws ssm get-parameter --name /dkron/prometheus/targets/dkron-host.json --query Parameter.Value --output text > /etc/prometheus/targets/dkron-host.json
-        aws ssm get-parameter --name /dkron/alertmanager/alertmanager.yml --query Parameter.Value --output text > /etc/alertmanager/alertmanager.yml
+      # ENTRYPOINT del Dockerfile es ["aws"]; lo sustituimos para poder ejecutar sh.
+      # Sin esto, ECS intenta ejecutar "aws sh -c ..." → exit 252 "Invalid choice: sh".
+      entryPoint = ["/bin/sh", "-c"]
+      command = [<<-EOT
+        set -e
+        mkdir -p /etc/prometheus/targets /etc/alertmanager
+        aws ssm get-parameter --name /dkron/prometheus/prometheus.yml             --query Parameter.Value --output text > /etc/prometheus/prometheus.yml
+        aws ssm get-parameter --name /dkron/prometheus/rules.yml                  --query Parameter.Value --output text > /etc/prometheus/rules.yml
+        aws ssm get-parameter --name /dkron/prometheus/targets/dkron.json         --query Parameter.Value --output text > /etc/prometheus/targets/dkron.json
+        aws ssm get-parameter --name /dkron/prometheus/targets/dkron-host.json    --query Parameter.Value --output text > /etc/prometheus/targets/dkron-host.json
+        aws ssm get-parameter --name /dkron/alertmanager/alertmanager.yml         --query Parameter.Value --output text > /etc/alertmanager/alertmanager.yml
       EOT
       ]
       mountPoints = [
@@ -5158,10 +5344,14 @@ resource "aws_ecs_task_definition" "grafana" {
   family                   = "dkron-grafana"
   network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
-  cpu                      = "256"
-  memory                   = "512"
-  execution_role_arn       = aws_iam_role.exec.arn
-  task_role_arn            = aws_iam_role.task.arn
+  # Grafana 11.2 recomienda mínimo 1 GB. Con 512 MB hacía OOM kill silencioso
+  # durante el boot (sqlite migrate + plugin scan), causando loop initial->drain.
+  # 2 GB da margen para plugins + dashboards sin tocar swap.
+  cpu    = "512"
+  memory = "2048"
+
+  execution_role_arn = aws_iam_role.exec.arn
+  task_role_arn      = aws_iam_role.task.arn
 
   volume {
     name = "graf-data"
@@ -5179,14 +5369,19 @@ resource "aws_ecs_task_definition" "grafana" {
       name      = "config-init"
       image     = "amazon/aws-cli:2.15.0"
       essential = false
-      command = ["sh", "-c", <<-EOT
+      # ENTRYPOINT del Dockerfile es ["aws"]; lo sustituimos para poder ejecutar sh.
+      entryPoint = ["/bin/sh", "-c"]
+      command = [<<-EOT
         set -e
         mkdir -p /var/lib/grafana/provisioning/datasources
         mkdir -p /var/lib/grafana/provisioning/dashboards
         mkdir -p /var/lib/grafana/dashboards
-        aws ssm get-parameter --name /dkron/grafana/datasource.yml          --query Parameter.Value --output text > /var/lib/grafana/provisioning/datasources/prometheus.yml
-        aws ssm get-parameter --name /dkron/grafana/dashboard_provider.yml  --query Parameter.Value --output text > /var/lib/grafana/provisioning/dashboards/dkron.yml
-        aws ssm get-parameter --name /dkron/grafana/dashboard.json          --query Parameter.Value --output text > /var/lib/grafana/dashboards/dkron-red.json
+        # --with-decryption: los 3 parameters de grafana son SecureString (KMS).
+        # Sin esto, get-parameter retorna el ciphertext "AQICAHj..." y Grafana
+        # falla con "cannot unmarshal !!str into []*dashboards.configV0".
+        aws ssm get-parameter --with-decryption --name /dkron/grafana/datasource.yml          --query Parameter.Value --output text > /var/lib/grafana/provisioning/datasources/prometheus.yml
+        aws ssm get-parameter --with-decryption --name /dkron/grafana/dashboard_provider.yml  --query Parameter.Value --output text > /var/lib/grafana/provisioning/dashboards/dkron.yml
+        aws ssm get-parameter --with-decryption --name /dkron/grafana/dashboard.json          --query Parameter.Value --output text > /var/lib/grafana/dashboards/dkron-red.json
         # Grafana corre como uid 472 — el access point EFS ya pone owner 472:472, pero forzamos por si acaso
         chown -R 472:472 /var/lib/grafana/provisioning /var/lib/grafana/dashboards || true
       EOT
@@ -5237,6 +5432,11 @@ resource "aws_ecs_service" "grafana" {
   task_definition = aws_ecs_task_definition.grafana.arn
   desired_count   = 1
   launch_type     = "FARGATE"
+
+  # Grafana tarda ~30-45s en arrancar (sqlite migrations + plugin scan).
+  # Sin gracia, el ALB marca unhealthy antes del primer 200 y ECS recicla
+  # el task en loop initial -> draining -> initial.
+  health_check_grace_period_seconds = 90
 
   network_configuration {
     subnets         = var.private_subnet_ids
@@ -5313,6 +5513,15 @@ resource "aws_lambda_function" "alertmgr_to_sns" {
   role             = aws_iam_role.lambda.arn
   filename         = data.archive_file.alertmgr_to_sns.output_path
   source_code_hash = data.archive_file.alertmgr_to_sns.output_base64sha256
+  # Sin reserved_concurrent_executions: AWS exige >= 10 concurrent unreserved
+  # tras cualquier reserva, y el quota por defecto de cuentas nuevas es 10.
+  # Si reservas N, quedan 10-N unreserved y AWS rechaza con InvalidParameter.
+  # En .checkov.yaml está skipeado CKV_AWS_115 con esta justificación.
+
+  tracing_config {
+    mode = "Active"
+  }
+
   environment { variables = { TOPIC_ARN = aws_sns_topic.alerts.arn } }
 }
 
@@ -5571,7 +5780,7 @@ Resultado: los **cuatro flujos de log** (Dkron, node_exporter, Prometheus, Grafa
 ## ❓ 8.8 ¿Y las migraciones de schema de Dkron al actualizar versión?
 La sección 3 paso 2 del PDF lo menciona: "esquema de migraciones de base de datos cuando aplica". Para Dkron con **BoltDB embebido**:
 - En el primer arranque, Dkron inicializa el archivo BoltDB en `/dkron.data` con su estructura interna (no hay tablas SQL — BoltDB es key-value).
-- Al **actualizar Dkron** (de `v4.0.9` a una versión futura), si la nueva versión cambia el formato del store, Dkron aplica la migración automáticamente al arrancar leyendo el archivo BoltDB existente.
+- Al **actualizar Dkron** (de `4.1.1` a una versión futura), si la nueva versión cambia el formato del store, Dkron aplica la migración automáticamente al arrancar leyendo el archivo BoltDB existente.
 - **Riesgo:** si la migración tarda y el ALB tiene `healthy_threshold` corto, el target queda unhealthy.
 - **Mitigación específica para EC2 + Compose:** el playbook `deploy.yml` hace `docker_compose_v2 ... pull: missing` y luego `wait_for: port=8080 timeout=90` antes del smoke test. Si la migración requiere más de 90s, ajusta el `timeout` del playbook **antes** de un upgrade mayor. Documenta esto en el runbook.
 - **Recomendación adicional para upgrades mayores:** toma un snapshot del volumen EBS (ver runbook R1) **antes** del upgrade. Si la migración falla, puedes restaurar el snapshot y volver a la versión anterior con `dkron_image_tag` previo.
@@ -5715,7 +5924,7 @@ La sección 3 paso 2 del PDF lo menciona: "esquema de migraciones de base de dat
 
 **Marco (con dato duro descubierto en producción):**
 - El PDF deja la elección al proyecto: "BoltDB local **o** PostgreSQL".
-- **Pero Dkron OSS v4 no soporta backend Postgres.** Los flags `--store=postgres`, `--backend=postgres` y `--dsn=...` solo existen en **Dkron Pro** (la versión comercial). Si pasas `--store=postgres` al binario OSS, el container imprime el listado completo de `dkron agent --help` y sale con código 1. Verificación directa: `docker run --rm dkron/dkron:v4.0.9 agent --help | grep -iE 'store|backend|dsn|postgres'` devuelve **vacío**.
+- **Pero Dkron OSS v4 no soporta backend Postgres.** Los flags `--store=postgres`, `--backend=postgres` y `--dsn=...` solo existen en **Dkron Pro** (la versión comercial). Si pasas `--store=postgres` al binario OSS, el container imprime el listado completo de `dkron agent --help` y sale con código 1. Verificación directa: `docker run --rm dkron/dkron:4.1.1 agent --help | grep -iE 'store|backend|dsn|postgres'` devuelve **vacío**.
 - Esto reduce la decisión real a **BoltDB sí o sí**, con la pregunta secundaria de **cómo mitigar la durabilidad**.
 
 **Opciones de durabilidad con BoltDB:**
@@ -5855,7 +6064,7 @@ Crea una `aws_dlm_lifecycle_policy` que tome un snapshot diario del volumen tag 
 4. Si el rollback no resuelve, escala a R3 (recreación de la EC2).
 
 ### Prevención
-- Los tags inmutables en ECR (`tag_mutability = "IMMUTABLE"`) garantizan que cada `v4.0.9` apunta a una imagen fija. Configúralo en `aws_ecr_repository`.
+- Los tags inmutables en ECR (`tag_mutability = "IMMUTABLE"`) garantizan que cada `4.1.1` apunta a una imagen fija. Configúralo en `aws_ecr_repository`.
 
 ---
 
@@ -5906,7 +6115,7 @@ Crea una `aws_dlm_lifecycle_policy` que tome un snapshot diario del volumen tag 
 ```markdown
 # Dkron en AWS — Caso D
 
-Despliegue del scheduler distribuido [Dkron](https://dkron.io) (versión `v4.0.9`)
+Despliegue del scheduler distribuido [Dkron](https://dkron.io) (versión `4.1.1`)
 en AWS sobre **EC2 + Docker Compose** gestionado por **Ansible**, con persistencia
 local en **BoltDB sobre EBS** (Dkron OSS no soporta Postgres — ver REPORTE.md y
 GUIA.md PARTE 5.4), ALB público, observabilidad híbrida (Prometheus + Grafana en
@@ -5948,9 +6157,9 @@ open http://localhost:3000             # Grafana (admin/admin)
    ```
    ECR=$(terraform output -raw ecr_repository_url)
    aws ecr get-login-password | docker login --username AWS --password-stdin $ECR
-   docker pull dkron/dkron:v4.0.9
-   docker tag  dkron/dkron:v4.0.9 $ECR:v4.0.9
-   docker push $ECR:v4.0.9
+   docker pull dkron/dkron:4.1.1
+   docker tag  dkron/dkron:4.1.1 $ECR:4.1.1
+   docker push $ECR:4.1.1
    ```
 4. Configurar la EC2 con Ansible (bootstrap):
    ```
@@ -5973,7 +6182,7 @@ open http://localhost:3000             # Grafana (admin/admin)
 Ver `docs/evidencias.md`.
 
 ## Versiones pinneadas
-- Dkron: `v4.0.9` (OSS — persistencia BoltDB embebida, sin Postgres)
+- Dkron: `4.1.1` (OSS — persistencia BoltDB embebida, sin Postgres)
 - node_exporter: `v1.8.2`
 - Prometheus: `v2.54.1`
 - Alertmanager: `v0.27.0`
@@ -6012,7 +6221,7 @@ Estructura (2.000–5.000 palabras), 5 secciones (sección 6.2 del PDF):
 
 ### B — Conceptos clave (~2-3 páginas, ~½ página por concepto — los **7 obligatorios** del PDF sección 6.2 B)
 1. **IaC vs gestión de configuración** — Terraform vs Ansible. **Aquí tienes ejemplo concreto:** Terraform crea EC2/IAM/SG/ALB/ECR; Ansible instala Docker, copia el compose, hace `docker pull` + restart. La frontera la cruzas en `output ec2_private_ip` (Terraform) → `aws_ec2.yml` (Ansible).
-2. **Containerización vs EC2 + Ansible** — Tu proyecto vivió las DOS cosas. Containers en local (Parte 3) y en producción (la imagen `dkron:v4.0.9` es bit-a-bit la misma). Pero la EC2 sigue necesitando Docker instalado, kernel actualizado, daemon configurado — eso lo hace Ansible. Justifica con datos del proyecto.
+2. **Containerización vs EC2 + Ansible** — Tu proyecto vivió las DOS cosas. Containers en local (Parte 3) y en producción (la imagen `dkron:4.1.1` es bit-a-bit la misma). Pero la EC2 sigue necesitando Docker instalado, kernel actualizado, daemon configurado — eso lo hace Ansible. Justifica con datos del proyecto.
 3. **CI / CD-delivery / CD-deployment** — Implementaste delivery (con aprobación manual antes de `terraform apply` y de `ansible-playbook deploy.yml`). Justifica el nivel elegido.
 4. **SLI / SLO / error budget** — Tus 2 SLOs (disponibilidad ≥99% y tasa de éxito ≥95%), justificación numérica de cada umbral.
 5. **Mínimo privilegio en IAM** — instance profile de EC2 (los managed `SSMManagedInstanceCore`/`CloudWatchAgentServerPolicy` + dos inline acotadas a SSM por ARN), role del runner GHA via OIDC, role de las tasks de Prom/Grafana. Qué permiso tuviste que ampliar y por qué (probablemente s3:* sobre el bucket `ansible-ssm`).
@@ -6074,7 +6283,7 @@ Tabla de costos mensuales (estimado con [AWS Pricing Calculator](https://calcula
 - [ ] Alerta llegó al email cuando la provocaste — el flujo Prometheus FIRING → Alertmanager → Lambda → SNS funciona end-to-end (capturada en evidencias)
 - [ ] `docs/runbook.md` tiene 3 procedimientos: R1 (backup/restore del EBS con BoltDB), R2 (rollback Ansible), R3 (recreación EC2)
 - [ ] `REPORTE.md` está completo (>2.000 palabras), escrito por TI, con frontera Terraform↔Ansible explicada
-- [ ] Todas las imágenes pinneadas (`v4.0.9`, no `latest`)
+- [ ] Todas las imágenes pinneadas (`4.1.1`, no `latest`)
 - [ ] Versión de `ansible-core` y de las colecciones documentadas en README
 - [ ] No hay secretos en el repo: `git log -p | grep -iE "password|secret|key" | head`
 - [ ] Tags `Project, Environment, Owner, ManagedBy` en TODOS los recursos
@@ -6676,9 +6885,9 @@ Esta sección documenta tres fallos que aparecieron al ejecutar el playbook por 
 
 **Síntoma:** después de `docker compose up -d`, `docker compose ps` muestra dkron con `Status: Restarting (1) Xs ago`. Los logs (`docker compose logs dkron`) imprimen el listado completo de flags de `dkron agent --help` y exit code 1.
 
-**Causa:** el compose le pasa `--store=postgres` al binario. **Dkron OSS v4.0.9 no soporta backends externos** — los flags `--store`, `--backend`, `--dsn` solo existen en Dkron Pro (la versión comercial). El binario OSS no reconoce `--store`, asume que pasaste un comando inválido, imprime el help y sale.
+**Causa:** el compose le pasa `--store=postgres` al binario. **Dkron OSS 4.1.1 no soporta backends externos** — los flags `--store`, `--backend`, `--dsn` solo existen en Dkron Pro (la versión comercial). El binario OSS no reconoce `--store`, asume que pasaste un comando inválido, imprime el help y sale.
 
-Verificación: en el host corre `docker run --rm <imagen>:v4.0.9 agent --help | grep -iE 'store|backend|dsn|postgres'` — devuelve vacío. Ninguno de esos flags existe.
+Verificación: en el host corre `docker run --rm <imagen>:4.1.1 agent --help | grep -iE 'store|backend|dsn|postgres'` — devuelve vacío. Ninguno de esos flags existe.
 
 **Fix aplicado:**
 1. Quitar `--store=postgres` del `command` del compose.
@@ -6708,3 +6917,174 @@ Unsupported parameters for (community.docker.docker_compose_v2) module: restarte
 ```
 
 **Por qué importa:** cuando migres de `docker_compose` v1 a v2 (recomendado, soporta Compose v2 nativo), revisa todos los parámetros. La docs oficial lista los soportados: `present`, `absent`, `stopped`, `restarted`.
+
+---
+
+# 🐛 PARTE 12 — ERRATA POST-DEPLOY: los bugs que SOLO aparecen en producción real
+
+> Esta parte se escribió **después** del primer deploy real con la infra de la guía. Si seguiste todas las partes 1-11 al pie de la letra y aún así algo no levanta, este es el lugar para mirar primero. Cada bug es una historia real con causa raíz exacta, log que lo delata y fix aplicado al repo. Todo está ya incluido en los snippets de las partes anteriores.
+
+## ❓ 12.1 Tag de DockerHub `v4.0.9` no existe — solo `4.0.9` sin `v`
+
+**Síntoma en CI:**
+```
+Error response from daemon: manifest for dkron/dkron:v4.0.9 not found: manifest unknown
+```
+
+**Causa:** DockerHub publica los tags como `4.0.9`, `4.1.1`, etc. (sin `v` al inicio). El bootcamp original asumía `v4.0.9` por convención de tags de Git. El `docker pull dkron/dkron:v4.0.9` retorna 404.
+
+**Fix:** todos los snippets de esta guía usan `4.1.1` (sin `v`). Verificar tags reales con `curl -s "https://hub.docker.com/v2/repositories/dkron/dkron/tags?page_size=10"`.
+
+## ❓ 12.2 Trivy bloquea 31 CVEs HIGH en `dkron/dkron:4.0.9`
+
+**Síntoma en CI:** job `trivy-scan` falla con tabla de 31 CVEs `HIGH` o `CRITICAL` — todas en el Go stdlib embebido en la imagen (net/url, crypto/x509, crypto/tls, archive/zip).
+
+**Causa:** Dkron 4.0.9 se publicó 2025-12-20 con un Go antiguo. Las CVEs son del runtime de Go, no del código de Dkron — el equipo de Dkron tendría que rebuildear con Go más nuevo.
+
+**Fix aplicado:** upgrade a **`4.1.1`** (publicada 2026-05-12 con Go 1.26.2) → bajamos a **5 CVEs**. Esas 5 están whitelisted en `.trivyignore` con justificación y fecha de revisión (ver sección 7.3 del workflow).
+
+## ❓ 12.3 Lambda `reserved_concurrent_executions = 5` rechazado en cuentas nuevas
+
+**Síntoma en `terraform apply`:**
+```
+Error: setting Lambda Function (dkron-alertmgr-to-sns) concurrency:
+InvalidParameterValueException: Specified ReservedConcurrentExecutions for
+function decreases account's UnreservedConcurrentExecution below its minimum value of [10].
+```
+
+**Causa:** AWS exige que tras cualquier reserva queden ≥10 concurrent executions disponibles para el resto. Cuentas nuevas tienen **quota total de 10**. Reservar 5 dejaría 5 disponibles → viola el mínimo.
+
+**Verificación del quota:**
+```bash
+aws service-quotas get-service-quota \
+  --service-code lambda --quota-code L-B99A9384 \
+  --region us-east-1 --query 'Quota.Value' --output text
+```
+
+**Fix aplicado:** quitar `reserved_concurrent_executions` del `aws_lambda_function`. La Lambda usa el pool unreserved (10 disponibles). Añadido `CKV_AWS_115` a `.checkov.yaml` con justificación.
+
+## ❓ 12.4 `pip install docker>=7.1` falla en AL2023 con "Cannot uninstall requests"
+
+**Síntoma en `ansible-playbook site.yml`:**
+```
+TASK [docker : Instalar SDK de Docker para Python]
+ERROR: Cannot uninstall requests 2.25.1, RECORD file not found.
+Hint: The package was installed by rpm.
+```
+
+**Causa:** `docker>=7.1` requiere `requests>=2.26`. Amazon Linux 2023 trae `requests 2.25.1` instalado por `dnf` (rpm), no por pip. pip no puede desinstalar paquetes instalados por rpm porque no hay `RECORD file`.
+
+**Fix aplicado:** añadir `extra_args: --ignore-installed` al `ansible.builtin.pip` del role `docker`. pip sobreescribe en site-packages sin desinstalar; la tarea de "Verificar integridad de python3-urllib3" del mismo role repara el rpm después.
+
+## ❓ 12.5 EC2 cruda + `deploy.yml` = "docker: command not found"
+
+**Síntoma:** primer deploy CI/CD termina con:
+```
+TASK [Validar que docker está instalado]
+fatal: [dkron-host]: FAILED! => {"msg": "[Errno 2] No such file or directory: b'docker'"}
+```
+
+**Causa:** el `user_data` del EC2 solo instala SSM agent + Python (mínimo). El playbook `deploy.yml` espera Docker ya instalado y aborta. La primera vez tras un `terraform apply` la EC2 está cruda.
+
+**Fix aplicado:** workflow CI/CD ejecuta `site.yml` (no `deploy.yml`). `site.yml` es idempotente: primera vez bootstrap completo, siguientes solo redeploya.
+
+## ❓ 12.6 ECS Fargate config-init exit 252 — `aws sh -c ...` no es comando válido
+
+**Síntoma:** task de Grafana/Prometheus en loop `initial → draining`. Log de `config-init`:
+```
+aws: error: argument command: Invalid choice, valid choices are:
+accessanalyzer | account | acm | ...
+```
+
+**Causa:** imagen `amazon/aws-cli:2.15.0` tiene `ENTRYPOINT = ["aws"]`. ECS pasa `command = ["sh", "-c", "..."]` y el container intenta ejecutar `aws sh -c ...` que falla.
+
+**Fix aplicado:** añadir `entryPoint = ["/bin/sh", "-c"]` al container `config-init` en task definitions de Grafana y Prometheus. ECS ejecuta `/bin/sh -c "<script>"` directo.
+
+**Sutileza:** `entryPoint = []` no funciona — Terraform/AWS lo normalizan a "ausente" y no detectan drift. Hay que pasar un entryPoint **no-vacío**.
+
+## ❓ 12.7 Grafana `cannot unmarshal !!str AQICAHj... into []*dashboards.configV0`
+
+**Síntoma:** task de Grafana arranca, config-init exit 0, container grafana arranca... y muere con:
+```
+Failed to read dashboards config: could not parse provisioning config file:
+dkron.yml error: yaml: unmarshal errors:
+  line 1: cannot unmarshal !!str `AQICAHj...` into []*dashboards.configV0
+```
+
+**Causa raíz** (el bug que más nos costó encontrar): los 3 parameters SSM de Grafana son `SecureString` (encriptados con KMS). El `aws ssm get-parameter` **sin `--with-decryption`** retorna el ciphertext base64 (`AQICAHj...`). config-init escribe ese ciphertext a EFS como si fuera el YAML. Grafana lee el archivo, intenta parsearlo como YAML, y al ser un string base64 falla.
+
+**Verificación:**
+```bash
+aws ssm get-parameter --name /dkron/grafana/datasource.yml --query 'Parameter.Type' --output text
+# → SecureString
+aws ssm get-parameter --name /dkron/grafana/datasource.yml --query 'Parameter.Value' --output text | head -c 20
+# → AQICAHj3riq6VNMki5...  (ciphertext)
+aws ssm get-parameter --name /dkron/grafana/datasource.yml --with-decryption --query 'Parameter.Value' --output text | head -c 20
+# → "apiVersion": 1...  (plaintext correcto)
+```
+
+**Fix aplicado:** añadir `--with-decryption` a los 3 `aws ssm get-parameter` del config-init de Grafana (ver sección 8.2 Paso 5).
+
+## ❓ 12.8 Task role sin `ssm:GetParameter` — AccessDenied silencioso
+
+**Síntoma:** config-init de Grafana/Prometheus falla con:
+```
+An error occurred (AccessDeniedException) when calling the GetParameter operation:
+User: arn:aws:sts::...:assumed-role/dkron-obs-task/... is not authorized to perform:
+ssm:GetParameter on resource: arn:aws:ssm:...:parameter/dkron/grafana/datasource.yml
+because no identity-based policy allows the ssm:GetParameter action
+```
+
+**Causa:** la policy `exec_ssm` original estaba adjunta solo al **execution role** (`dkron-obs-exec`). ECS agent usa ese rol para resolver `secrets` y `valueFrom` antes de arrancar el container. Pero el container `config-init` invoca `aws ssm get-parameter` DENTRO del container — eso usa el **task role** (`dkron-obs-task`), no el execution role. Sin policy SSM en el task role, AWS deniega.
+
+**Fix aplicado:** añadir resource `aws_iam_role_policy.task_ssm` al task role con `ssm:GetParameter` + `ssm:GetParameters` + `kms:Decrypt`. El `kms:Decrypt` va en un **statement separado** con `Resource = "*"` + `Condition kms:ViaService = ssm.<region>.amazonaws.com` — si lo dejas con Resource del SSM ARN, es implicit-deny porque KMS evalúa contra la KMS key, no el parameter (ver sección 8.2.1).
+
+## ❓ 12.9 Grafana ECS service `healthCheckGracePeriodSeconds = 0` → loop initial/draining
+
+**Síntoma:** task de Grafana arranca, registra en TG, pasa a `initial`, no responde el primer `/api/health` a tiempo, TG lo marca `unhealthy`, ECS lo recicla. Loop sin fin.
+
+**Causa:** Grafana 11.2 tarda ~30-45s en arrancar (sqlite migrate + plugin scan + provisioning). El TG hace healthchecks cada 30s; con `healthy_threshold=3, unhealthy_threshold=3` y service `grace=0`, AWS empieza a contar fallos desde t=0 y mata el task antes de que pueda responder.
+
+**Fix aplicado:** `health_check_grace_period_seconds = 90` en el `aws_ecs_service.grafana` (ver sección 8.2 Paso 5). Da margen para que Grafana arranque antes de empezar a contar healthchecks.
+
+## ❓ 12.10 Grafana 256 CPU / 512 MB → OOM kill silencioso al arrancar
+
+**Síntoma:** task arranca pero termina con LastStatus=STOPPED, sin error claro en el log. El último mensaje del log es una migración SQLite normal. Combinado con el grace period 0, el patrón aparece como un loop pero la causa es distinta.
+
+**Causa:** Grafana 11.2 con todos los feature toggles activados pide ≥1 GB de RAM. Con 512 MB, durante `plugin scan` o `sqlite migrate`, el kernel mata el proceso con OOM. Fargate registra el container como Stopped sin exit code.
+
+**Fix aplicado:** subir a `cpu = "512"` / `memory = "2048"` en el `aws_ecs_task_definition.grafana`.
+
+## ❓ 12.11 SG de Prometheus sin ingress 9090 → Grafana datasource health failed
+
+**Síntoma latente:** Grafana arranca OK pero el datasource "Prometheus" en la UI muestra "datasource health check failed" o "connection refused".
+
+**Causa:** el SG-prom tenía solo egress, sin ingress. Cuando Grafana resuelve `prometheus.dkron.local:9090` (Cloud Map) y conecta TCP/9090, el SG bloquea el handshake silenciosamente.
+
+**Fix aplicado:** regla cross-SG `prom_from_graf_9090` que permite ingress TCP 9090 desde el SG-graf (ver sección 8.2.2).
+
+## ❓ 12.12 `terraform destroy` bloqueado por ECR con imágenes
+
+**Síntoma:** `terraform destroy` falla a mitad con:
+```
+Error: deleting ECR Repository: RepositoryNotEmptyException:
+The repository with name 'dkron-dkron' in registry with id '...' has images,
+delete the images or use the force flag
+```
+
+**Causa:** `aws_ecr_repository` por defecto no permite borrar si hay imágenes pusheadas. Al destruir hay 3 tags (`v4.0.9` legacy, `4.0.9`, `4.1.1`) → bloquea.
+
+**Fix aplicado:**
+1. `force_delete = true` en el `aws_ecr_repository` (cambio permanente — necesita un apply previo para tomar efecto).
+2. Step previo en `destruir.yaml` con `aws ecr batch-delete-image` como defensa en profundidad (funciona aunque el state aún no tenga `force_delete`).
+
+## 🎓 Lección general
+
+**Los 12 bugs comparten un patrón:** todos son cosas que funcionan en local o en cuentas AWS maduras pero rompen en producción con la combinación específica (cuenta nueva + imagen real upstream + IAM granular + Fargate awsvpc).
+
+**Disciplina recomendada para próximas iteraciones:**
+1. Ante un loop `initial → draining` en ECS Fargate: lee primero el log del **container essential** (grafana, prometheus), no del init container.
+2. Ante `AccessDenied` en SSM/KMS: revisa cuál rol está haciendo la llamada (task role vs execution role).
+3. Ante imágenes con `ENTRYPOINT` no-shell: override con `entryPoint = ["/bin/sh", "-c"]` (no `[]` — ese no es detectado como cambio por TF).
+4. Ante `cannot unmarshal !!str` con prefijo `AQICAHj...`: es ciphertext SecureString. Te falta `--with-decryption`.
+5. Antes de aprobar el primer deploy: revisa quotas de la cuenta (`aws service-quotas list-service-quotas --service-code lambda`).
