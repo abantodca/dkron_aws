@@ -1,0 +1,38 @@
+x-logging: &awslogs
+  driver: awslogs
+  options:
+    awslogs-region: {{ region }}
+    awslogs-group: {{ cw_log_group_compose }}
+    awslogs-create-group: "true"
+
+services:
+  dkron:
+    image: {{ ecr_repo }}:{{ dkron_image_tag }}
+    container_name: dkron
+    restart: unless-stopped
+    env_file: .env
+    command:
+      - agent
+      - --server
+      - --bootstrap-expect=1
+      - --node-name={{ dkron_node_name }}
+      - --data-dir=/dkron.data
+      - --log-level={{ dkron_log_level }}
+    ports:
+      - "8080:8080"
+    volumes:
+      - {{ dkron_data_volume }}:/dkron.data
+    logging: *awslogs
+
+  node-exporter:
+    image: prom/node-exporter:{{ node_exporter_image_tag }}
+    container_name: node-exporter
+    restart: unless-stopped
+    pid: host
+    network_mode: host    # expone :9100 en la IP privada de la EC2
+    command:
+      - --path.rootfs=/host
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)
+    volumes:
+      - /:/host:ro,rslave
+    logging: *awslogs

@@ -1,0 +1,62 @@
+---
+- name: Instalar paquetes base
+  ansible.builtin.dnf:
+    name:
+      - docker
+      - python3-pip
+      - python3-urllib3
+    state: present
+
+- name: Habilitar y arrancar Docker
+  ansible.builtin.systemd:
+    name: docker
+    state: started
+    enabled: true
+
+- name: Agregar usuario(s) al grupo docker
+  ansible.builtin.user:
+    name: "{{ item }}"
+    groups: docker
+    append: true
+  loop: "{{ docker_users }}"
+
+- name: Instalar plugin Docker Compose v2 (binario)
+  ansible.builtin.get_url:
+    url: "https://github.com/docker/compose/releases/download/{{ docker_compose_plugin_version }}/docker-compose-linux-x86_64"
+    dest: /usr/libexec/docker/cli-plugins/docker-compose
+    mode: "0755"
+    owner: root
+    group: root
+  notify: Reiniciar docker
+
+- name: Instalar SDK de Docker para Python (necesario para el módulo community.docker)
+  ansible.builtin.pip:
+    name:
+      - "docker>=7.1"
+      - "PyYAML"
+    state: present
+
+- name: Verificar integridad de python3-urllib3 (pip puede sobreescribir sus archivos y romper awscli)
+  ansible.builtin.command: rpm -V python3-urllib3
+  register: urllib3_verify
+  failed_when: false
+  changed_when: false
+
+- name: Reinstalar python3-urllib3 si está corrupto
+  ansible.builtin.command: dnf reinstall -y python3-urllib3
+  when: urllib3_verify.stdout | length > 0
+
+- name: Obtener token efímero de ECR (válido 12h)
+  ansible.builtin.command:
+    cmd: "aws ecr get-login-password --region {{ region }}"
+  register: ecr_token
+  changed_when: false
+  no_log: true
+  tags: [deploy]
+
+- name: docker login al ECR
+  ansible.builtin.shell:
+    cmd: "echo '{{ ecr_token.stdout }}' | docker login --username AWS --password-stdin {{ ecr_repo | regex_replace('/.*$', '') }}"
+  changed_when: false
+  no_log: true
+  tags: [deploy]

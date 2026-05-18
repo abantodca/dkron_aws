@@ -1,0 +1,5 @@
+---
+dkron_dir: /opt/dkron
+dkron_data_volume: /var/lib/dkron-data
+dkron_log_level: info
+dkron_node_name: dkron-server

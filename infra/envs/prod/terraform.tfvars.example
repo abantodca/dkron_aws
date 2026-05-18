@@ -1,0 +1,10 @@
+# infra/envs/prod/terraform.tfvars.example
+# Copia este archivo a terraform.tfvars y rellena con tus valores REALES.
+# terraform.tfvars está en .gitignore — NUNCA lo subas.
+
+owner                  = "tunombre"
+ssh_public_key         = "ssh-ed25519 AAAA... tunombre@laptop"
+ssh_allowed_cidrs      = []                          # vacío = SSH cerrado
+github_repo            = "tunombre/dkron-aws"        # owner/repo (usado por CI/CD)
+alert_email            = "tu-correo@gmail.com"
+grafana_admin_password = "Cambia-Esto-También-Por-Algo-Largo-123!"

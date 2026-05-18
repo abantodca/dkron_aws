@@ -32,9 +32,10 @@
 ### 📝 Fase entrega (decisiones, runbook, reporte)
 - [PARTE 9 — Responder las 5 preguntas de decisión técnica del Caso D](#parte-9)
 - [PARTE 10 — Runbook, README y REPORTE](#parte-10)
-- [PARTE 11 — Tabla maestra de errores más comunes](#parte-11)
+- [PARTE 11 — Errores reales encontrados en producción (sesión de debug 2026-05-17)](#parte-11)
 - [PARTE 12 — Cierre, destrucción y costo cero](#parte-12)
 - [PARTE 13 — Cronograma sugerido de 6 semanas](#parte-13)
+- [PARTE 14 — Tabla maestra de errores más comunes](#parte-14)
 - [APÉNDICE A — Bitácora de errores ("yo me equivoqué así")](#apendice-a)
 - [APÉNDICE B — Glosario rápido (incluye términos Ansible)](#apendice-b)
 
@@ -217,8 +218,9 @@ El bootcamp **obliga** a usar AWS (no GCP, no Azure — ver FAQ del PDF).
 ## ❓ 0.3 ¿Cuánto me va a costar?
 La sección 7 del PDF lo explica: **AWS Free Tier cubre la mayoría del consumo**. Los componentes que cuestan dinero continuo son:
 - **NAT Gateway** (~$32/mes si lo dejas prendido 24/7 — pero solo lo prendes cuando trabajas)
-- **RDS PostgreSQL** (~$15/mes para `db.t3.micro` Free Tier; después del free tier algo más)
 - **ALB** (~$16/mes si lo dejas todo el mes prendido)
+
+> 💡 **Ojo:** este proyecto **NO usa RDS**. La persistencia de Dkron OSS vive en **BoltDB embebido** sobre un volumen EBS de la propia EC2 (ver PARTE 9.2). Eso te ahorra ~$15/mes de RDS y un módulo Terraform entero. Si vienes de un tutorial antiguo que decía "RDS Postgres ~$15/mes", esa línea ya no aplica aquí.
 
 **Truco crítico:** apaga TODO cuando termines de trabajar. Hay un workflow `destruir.yaml` que ejecuta `terraform destroy`. Úsalo cada noche. Sin esto, la cuenta puede subir a $50–$80 al mes. **Si trabajas 2 horas al día y destruyes después, el costo total del proyecto suele ser <$5.**
 
@@ -276,7 +278,7 @@ cat ~/.ssh/id_ed25519.pub  # copia esto
 
 Componentes mínimos que pide el PDF (página 10):
 - Container de Dkron (modo `server` y opcionalmente un `agent` aparte para los runs).
-- RDS PostgreSQL para guardar los jobs y su histórico.
+- **Persistencia local en BoltDB** (archivo embebido en el container, montado sobre un volumen EBS de la EC2). El PDF dice "BoltDB local **o** PostgreSQL" — en esta guía vamos con BoltDB porque **Dkron OSS v4 no soporta backends Postgres** (el flag `--store=postgres` solo existe en Dkron Pro, la versión comercial). Más detalle y justificación en PARTE 9.2.
 - (Opcional) Bucket S3 para los outputs de los jobs.
 
 Métricas a vigilar: **jobs ejecutados a tiempo, drift de horario, jobs fallidos, duración p95 por tipo de job.**
@@ -304,12 +306,14 @@ Métricas a vigilar: **jobs ejecutados a tiempo, drift de horario, jobs fallidos
    │   ┌──────────────────────────────────────────────────────┐   │
    │   │  Docker Engine                                       │   │
    │   │                                                      │   │
-   │   │   ┌─────────────┐         ┌─────────────┐            │   │
-   │   │   │  Dkron      │────────▶│ PostgreSQL  │            │   │
-   │   │   │  :8080      │  store  │  :5432      │            │   │
-   │   │   │  /metrics   │         │  vol pg_data│            │   │
-   │   │   └──────┬──────┘         └─────────────┘            │   │
-   │   │          │ scrape /metrics cada 15s                  │   │
+   │   │   ┌─────────────────────────┐                       │   │
+   │   │   │  Dkron                  │                       │   │
+   │   │   │  :8080                  │                       │   │
+   │   │   │  /metrics               │                       │   │
+   │   │   │  store: BoltDB embebido │                       │   │
+   │   │   │  vol dkron_data         │                       │   │
+   │   │   └──────┬──────────────────┘                       │   │
+   │   │          │ scrape /metrics cada 15s                 │   │
    │   │          ▼                                           │   │
    │   │   ┌─────────────┐         ┌─────────────┐            │   │
    │   │   │ Prometheus  │◀────────│  Grafana    │            │   │
@@ -346,39 +350,21 @@ git init
 **Archivo `compose/docker-compose.yml`:**
 ```yaml
 services:
-  postgres:
-    image: postgres:15.4
-    container_name: dkron-postgres
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
-    ports:
-      - "5432:5432"
-    volumes:
-      - pg_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
-      interval: 5s
-      retries: 5
-
   dkron:
-    image: dkron/dkron:v3.2.7
+    image: dkron/dkron:v4.0.9
     container_name: dkron-server
-    depends_on:
-      postgres:
-        condition: service_healthy
     command:
       - agent
       - --server
       - --bootstrap-expect=1
       - --node-name=dkron-server
-      - --store=postgres
-      - --dsn=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      - --data-dir=/dkron.data
       - --log-level=info
     ports:
       - "8080:8080"
       - "8946:8946"
+    volumes:
+      - dkron_data:/dkron.data
 
   prometheus:
     image: prom/prometheus:v2.54.1
@@ -422,10 +408,12 @@ services:
       - "3000:3000"
 
 volumes:
-  pg_data:
+  dkron_data:
   prom_data:
   grafana_data:
 ```
+
+> 💡 **¿Y dónde está Postgres?** No está, a propósito. **Dkron OSS v4 usa BoltDB embebido** — es un archivo local dentro del container, en `/dkron.data`. Lo persistimos con el volumen `dkron_data` para que sobreviva a `docker compose down/up`. La opción `--store=postgres` que vas a ver en tutoriales viejos **solo existe en Dkron Pro** (la versión comercial); si la usas con el binario OSS, el container imprime el help y muere. Ver PARTE 11.2 para el debug real que nos llevó a esto.
 
 **Archivo `compose/prometheus/prometheus.yml`** (scrape config + reglas de alerta):
 ```yaml
@@ -576,21 +564,17 @@ providers:
 
 **Archivo `compose/.env.example`** (este SÍ se sube al repo):
 ```env
-POSTGRES_USER=dkron
-POSTGRES_PASSWORD=cambiame_local_only
-POSTGRES_DB=dkron
 GRAFANA_USER=admin
 GRAFANA_PASSWORD=admin
 ```
 
 **Archivo `compose/.env`** (NO subir al repo):
 ```env
-POSTGRES_USER=dkron
-POSTGRES_PASSWORD=cambiame_local_only
-POSTGRES_DB=dkron
 GRAFANA_USER=admin
 GRAFANA_PASSWORD=admin
 ```
+
+> 💡 **¿Por qué este `.env` está casi vacío?** Antes contenía `POSTGRES_USER/PASSWORD/DB` para inyectar el DSN al Dkron. Como ya no hay Postgres (BoltDB no necesita credenciales — es un archivo local), solo quedan las variables de Grafana.
 
 **Archivo `.gitignore`** en la raíz:
 ```
@@ -620,15 +604,7 @@ Espera ~20 segundos y abre en tu navegador:
 
 ## 💥 Errores que vas a cometer en la PARTE 3 (te van a pasar uno por uno)
 
-### Error 3.A: "connection refused" al conectar Dkron a Postgres
-**Síntoma:** `docker compose logs dkron` muestra:
-```
-ERRO[2026-05-10T...] dial tcp 172.18.0.2:5432: connect: connection refused
-```
-**Causa:** Postgres tarda ~5s en arrancar. Sin `condition: service_healthy`, Dkron se conecta antes de que esté listo.
-**Solución:** verifica que tu compose tenga el `healthcheck` en postgres y `condition: service_healthy` en `depends_on`. Reinicia: `docker compose down && docker compose up -d`.
-
-### Error 3.B: "port is already allocated" en 8080 o 5432
+### Error 3.B: "port is already allocated" en 8080
 **Síntoma:** `Error response from daemon: ports are not available`.
 **Causa:** otro proceso usa ese puerto.
 **Solución 1:** descubre quién: `sudo lsof -i :8080`. Mátalo si puedes.
@@ -651,11 +627,11 @@ docker ps  # ya sin sudo
 ### Error 3.D: Usaste `dkron/dkron:latest`
 **Síntoma:** todo funciona pero violaste la regla del PDF.
 **Causa:** `latest` no es reproducible.
-**Solución:** cambia a `dkron/dkron:v3.2.7`. Documéntalo en el README ("imagen pinneada a v3.2.7").
+**Solución:** cambia a `dkron/dkron:v4.0.9`. Documéntalo en el README ("imagen pinneada a v4.0.9").
 
 ### Error 3.E: La UI carga pero no autentica (versiones recientes de Dkron)
 **Síntoma:** dashboard pide credenciales que no tienes.
-**Solución:** la versión `v3.2.7` no las exige por defecto. Si bajaste otra versión, busca en el changelog si hay flag `--no-auth`.
+**Solución:** la versión `v4.0.9` no las exige por defecto. Si bajaste otra versión, busca en el changelog si hay flag `--no-auth`.
 
 ### Error 3.F: `docker compose` te dice "command not found"
 **Síntoma:** `docker compose up` falla.
@@ -729,7 +705,7 @@ Las mismas tres métricas (más `up{job="dkron"}` que añade Prometheus) las pue
 
 **Concepto B.2 del reporte (containerización vs "EC2 + Ansible" para CI/CD).** Aquí tienes que ser HONESTO en el reporte: en este proyecto vas a usar **las dos cosas a la vez**:
 
-- En tu laptop: `docker compose up` levantó cuatro servicios en 30 segundos. Cero configuración de SO, cero "instalar Postgres", cero "abrir el firewall". Ese es el valor del container: empaqueta runtime + dependencias + red.
+- En tu laptop: `docker compose up` levantó cuatro servicios en 30 segundos. Cero configuración de SO, cero "instalar dependencias", cero "abrir el firewall". Ese es el valor del container: empaqueta runtime + dependencias + red.
 - En AWS (Parte 5-6): vas a tener una **EC2 con Docker Compose configurado por Ansible**. Significa que debajo de los containers tienes una capa adicional ("¿la EC2 tiene Docker instalado?", "¿la versión correcta de docker compose plugin?", "¿el daemon corre con los flags que queremos?"). Esa capa la gestiona Ansible — no Terraform, no el container.
 
 **Lo que vas a defender en el reporte (te lo dejo apuntado):**
@@ -783,8 +759,8 @@ docker compose down  # detén todo, libera recursos
    ║   ║  │                          │                             ║    ║
    ║   ║  │   ┌─────────────────┐    │                             ║    ║
    ║   ║  │   │ Server          │    │     ┌─────────────────────┐ ║    ║
-   ║   ║  │   │ (scheduler)     │────┼─────│ PostgreSQL          │ ║    ║
-   ║   ║  │   │                 │ state    │ RDS · single-AZ     │ ║    ║
+   ║   ║  │   │ (scheduler)     │────┼─────│ BoltDB embebido     │ ║    ║
+   ║   ║  │   │                 │ state    │ volumen EBS gp3     │ ║    ║
    ║   ║  │   └────────┬────────┘    │     │ (jobs e historial)  │ ║    ║
    ║   ║  │            │             │     └─────────────────────┘ ║    ║
    ║   ║  │      dispatch            │                             ║    ║
@@ -834,9 +810,9 @@ docker compose down  # detén todo, libera recursos
 
 1. **Operador** = tú (o cualquier humano/CI) hablándole a Dkron por su REST API o por su UI web.
 2. **ALB** en subnet pública: la única puerta abierta a Internet. Recibe el tráfico del operador y lo reenvía al Server.
-3. **Server (scheduler)**: dentro de la subnet privada, lleva el reloj y guarda el estado en RDS. Cuando llega la hora de un job, dispara un *dispatch* al Agent.
+3. **Server (scheduler)**: dentro de la subnet privada, lleva el reloj y guarda el estado en **BoltDB embebido** (archivo local persistido en un volumen EBS). Cuando llega la hora de un job, dispara un *dispatch* al Agent.
 4. **Agent (executor)**: dentro de la misma subnet, recibe el dispatch y EJECUTA el job. Como dice la nota literal del PDF, *"opcional · puede ser el mismo nodo"* — en single-node es el mismo binario actuando con dos roles.
-5. **PostgreSQL RDS single-AZ**: el libro de jobs e historial. Sólo recibe tráfico del SG donde corre Dkron.
+5. **BoltDB embebido + EBS gp3**: el "libro" de jobs e historial. El PDF te deja elegir entre BoltDB y PostgreSQL; aquí vamos con **BoltDB** porque Dkron OSS v4 no soporta el flag `--store=postgres` (solo existe en Dkron Pro). La durabilidad la cubrimos montando el data dir sobre un volumen EBS encriptado.
 6. **S3 outputs (opcional)**: si los jobs generan archivos grandes, el Agent los sube ahí. Si no, se omite.
 7. **Plataforma lateral**:
    - *Logs y métricas (camino a elegir)*: el PDF deja la elección al proyecto (sección 5.4 — Camino 1 self-hosted Prometheus/Grafana/Loki, Camino 2 CloudWatch nativo, Camino 3 AMP/AMG). **Este proyecto elige Camino 1**.
@@ -914,10 +890,16 @@ Imagina que abres un restaurante. **Tu cocina tiene 30 tareas diarias que repeti
    │   • El ayudante sale a buscarlos por la puerta de atrás     │
    │     (NAT Gateway en AWS)                                    │
    ├─────────────────────────────────────────────────────────────┤
-   │   El RECETARIO (PostgreSQL RDS · single-AZ)                 │
-   │   • Libro permanente donde el jefe anota cada tarea         │
-   │     y cada vez que se ejecuta                               │
-   │   • Si el jefe se enferma y viene otro, el libro está ahí   │
+   │   El RECETARIO (BoltDB embebido sobre volumen EBS)          │
+   │   • Cuaderno propio del cocinero, sobre un anaquel          │
+   │     fijo en la cocina (volumen EBS encriptado)              │
+   │   • El jefe anota cada tarea y cada ejecución               │
+   │   • Si la cocina se incendia, el anaquel sobrevive          │
+   │     (snapshots EBS) — pero si tiras toda la cocina sin      │
+   │     guardar el cuaderno, lo pierdes                         │
+   │   • NO es un "libro en caja fuerte de otro local" (RDS) —   │
+   │     Dkron OSS no soporta backend Postgres, ese flag solo    │
+   │     existe en Dkron Pro                                     │
    ├─────────────────────────────────────────────────────────────┤
    │   La DESPENSA DE RECETAS (ECR · mirror imagen oficial)      │
    │   • Una copia local del manual del cocinero (imagen Docker) │
@@ -954,9 +936,10 @@ El proyecto NO es escribir Dkron (Dkron ya existe, es open source). El proyecto 
     la imagen del PDF]                     atrás si tiene que ir a otra
                                            tienda (target externo)
 
-   RDS PostgreSQL single-AZ           ←→   El recetario y libro de pedidos
-   [bloque "PostgreSQL RDS · single-AZ     (recuerda qué tareas hay, a qué
-    (jobs e historial)" del PDF]           hora y cómo terminó cada una)
+   BoltDB embebido + volumen EBS      ←→   El cuaderno propio del cocinero
+   [el PDF lista BoltDB o PostgreSQL;       sobre un anaquel fijo (recuerda
+    Dkron OSS solo soporta BoltDB,          qué tareas hay, a qué hora y
+    Postgres es feature de Dkron Pro]       cómo terminó cada una)
 
    ALB (subnet pública)               ←→   La puerta principal del
    [bloque "Application Load Balancer"     restaurante (los operadores
@@ -1030,12 +1013,22 @@ El PDF (página 11) pide 5 decisiones. Aquí van con manzanitas:
                                       → Para un restaurante chico
                                         (alcance del proyecto), 1 basta.
 
-  2. ¿BoltDB o PostgreSQL?            ¿El recetario en una pizarrita
-                                      borrable o en un libro permanente?
-                                      → BoltDB: pizarrita en la cocina.
-                                        Si se moja, perdiste todo.
-                                      → PostgreSQL: libro en caja fuerte.
-                                        Sobrevive incendios.
+  2. ¿BoltDB o PostgreSQL?            ¿El recetario en un cuaderno propio
+                                      del cocinero o en un libro de otro
+                                      local?
+                                      → BoltDB: cuaderno del cocinero,
+                                        sobre un anaquel fijo de la
+                                        cocina (volumen EBS). Resiste
+                                        reinicios; si tiras la cocina
+                                        sin guardar el cuaderno, lo
+                                        pierdes (mitigación: snapshots
+                                        de EBS).
+                                      → PostgreSQL (RDS): libro en otro
+                                        local de la cadena. Suena bien,
+                                        pero Dkron OSS NO soporta este
+                                        flag — solo Dkron Pro lo tiene.
+                                        Para este Caso D vamos con
+                                        BoltDB (es la única opción real).
 
   3. ¿Cómo medir el drift?            ¿Cómo sé si el cocinero llega
                                       tarde a sus tareas?
@@ -1067,10 +1060,13 @@ El PDF (página 11) pide 5 decisiones. Aquí van con manzanitas:
    abierta a la calle. Cualquiera entraría. El ALB es la puerta
    principal con guardia: "tú entras por aquí o no entras".
 
-   ¿Por qué Dkron está en subnet privada y RDS también?
-   ───────────────────────────────────────────────────
-   Porque la cocina y la bodega no deben estar a la vista del cliente.
-   Solo el ALB es público. Todo lo demás está adentro.
+   ¿Por qué Dkron está en subnet privada?
+   ──────────────────────────────────────
+   Porque la cocina no debe estar a la vista del cliente.
+   Solo el ALB es público. Todo lo demás (la EC2 con Dkron,
+   el volumen EBS con el cuaderno BoltDB, las tasks de
+   observabilidad) vive en subnet privada y solo se llega
+   por el ALB.
 
    ¿Por qué replicar la imagen oficial a ECR?
    ──────────────────────────────────────────
@@ -1131,13 +1127,13 @@ Tiene:
 - **REST API** para crear/borrar/listar jobs (`POST /v1/jobs`, `GET /v1/jobs/...`).
 - **Panel web** en `http://servidor:8080/dashboard`.
 - **Métricas Prometheus** en `/metrics`.
-- **Almacenamiento** en BoltDB (archivo local, efímero) o PostgreSQL (recomendado para producción).
+- **Almacenamiento** en BoltDB (archivo embebido — la única opción real en Dkron OSS; el flag `--store=postgres` solo existe en Dkron Pro). En este proyecto lo persistimos sobre un volumen EBS encriptado para que sobreviva a reinicios.
 
 ## ❓ 1.2 ¿Qué decisiones técnicas debo justificar?
 Las **5 decisiones obligatorias** del Caso D (página 11 del PDF):
 
 1. **¿Un único nodo Dkron o un cluster?** ¿Qué aporta operar en cluster?
-2. **¿BoltDB local o PostgreSQL?** ¿Qué se gana en cada caso?
+2. **¿BoltDB local o PostgreSQL?** ¿Qué se gana en cada caso? (Spoiler: Dkron OSS solo permite BoltDB — Postgres es feature de Dkron Pro. Lo discutimos igual en PARTE 9.2 para tener material en el reporte.)
 3. **¿Cómo se mide el drift** (diferencia entre la hora programada y la real)? ¿Qué métrica registra ese delta?
 4. **¿Cómo se previene la ejecución duplicada** si Dkron reinicia mientras corría?
 5. **¿Qué política de timeout aplica** y qué pasa con un job que la excede?
@@ -1150,7 +1146,7 @@ Estas las contestas en el **REPORTE.md**. La guía te lleva paso a paso a las re
 
 ## 🗺️ Diagrama: lo que vas a tener al terminar
 
-> 📐 **Base de este diagrama:** topología sugerida del Escenario D en la página 11 del PDF — Operador → ALB (subnet pública) → Dkron `Server (scheduler)` con un `Agent (executor)` opcional ("puede ser el mismo nodo") → RDS PostgreSQL single-AZ, con ECR como mirror de la imagen oficial, S3 opcional para outputs de jobs, y Targets de los jobs (HTTP, scripts) **fuera de la VPC**. Reflejamos esa topología fielmente y le superponemos la decisión propia del proyecto (Opción B del PDF 5.2: EC2 + Compose + Ansible) y la observabilidad (camino a elegir — sección 5.4 del PDF).
+> 📐 **Base de este diagrama:** topología sugerida del Escenario D en la página 11 del PDF — Operador → ALB (subnet pública) → Dkron `Server (scheduler)` con un `Agent (executor)` opcional ("puede ser el mismo nodo") → **persistencia local en BoltDB sobre EBS** (el PDF también lista Postgres como alternativa, pero Dkron OSS no la soporta — ver PARTE 9.2), con ECR como mirror de la imagen oficial, S3 opcional para outputs de jobs, y Targets de los jobs (HTTP, scripts) **fuera de la VPC**. Reflejamos esa topología fielmente y le superponemos la decisión propia del proyecto (Opción B del PDF 5.2: EC2 + Compose + Ansible) y la observabilidad (camino a elegir — sección 5.4 del PDF).
 
 ```
               Operador (REST API · UI)
@@ -1165,22 +1161,27 @@ Estas las contestas en el **REPORTE.md**. La guía te lleva paso a paso a las re
    ╔════════════════════════════════════════════════════════════╗
    ║              SUBNET PRIVADA                                ║
    ║                                                            ║
-   ║   ┌────────────────────────────────┐    ┌──────────────┐  ║
-   ║   │ EC2 (t3.small)  —  Docker      │    │ RDS Postgres │  ║
-   ║   │ Compose v2, cfg por ANSIBLE    │    │ db.t3.micro  │  ║
-   ║   │ ┌────────────────────────────┐ │    │ single-AZ    │  ║
-   ║   │ │ dkron-server (scheduler)   │─┼───▶│ (jobs e      │  ║
-   ║   │ │  :8080  /metrics           │ │state│  histórico) │  ║
-   ║   │ └────────────┬───────────────┘ │    └──────────────┘  ║
-   ║   │              │ dispatch        │                      ║
-   ║   │              ▼                 │                      ║
-   ║   │ ┌────────────────────────────┐ │                      ║
-   ║   │ │ dkron-agent (executor)     │─┼──── ejecución ───────╫──▶ Targets de los jobs
-   ║   │ │  OPCIONAL · puede ser el   │ │                      ║    (HTTP, scripts — fuera
-   ║   │ │  mismo proceso del server  │ │                      ║     de la VPC)
-   ║   │ └────────────┬───────────────┘ │                      ║
-   ║   │ + node_exporter :9100          │                      ║
-   ║   └──────────────┼─────────────────┘                      ║
+   ║   ┌────────────────────────────────────────────────────┐  ║
+   ║   │ EC2 (t3.micro)  —  Docker Compose v2, cfg ANSIBLE  │  ║
+   ║   │ ┌────────────────────────────┐                     │  ║
+   ║   │ │ dkron-server (scheduler)   │──┐                  │  ║
+   ║   │ │  :8080  /metrics           │  │ state            │  ║
+   ║   │ │  --data-dir=/dkron.data    │  ▼                  │  ║
+   ║   │ └────────────┬───────────────┘ ┌──────────────────┐│  ║
+   ║   │              │ dispatch        │ BoltDB embebido  ││  ║
+   ║   │              ▼                 │ vol EBS gp3 enc. ││  ║
+   ║   │ ┌────────────────────────────┐ │ /var/lib/        ││  ║
+   ║   │ │ dkron-agent (executor)     │ │   dkron-data     ││  ║
+   ║   │ │  OPCIONAL · mismo proceso  │ └──────────────────┘│  ║
+   ║   │ │  del server                │                     │  ║
+   ║   │ └────────────┬───────────────┘                     │  ║
+   ║   │ + node_exporter :9100                              │  ║
+   ║   └──────────────┼─────────────────────────────────────┘  ║
+   ║                  │ ejecución                              ║
+   ║                  ▼                                        ║
+   ║                  └─────────────────────────────────────────╫──▶ Targets de los jobs
+   ║                                                           ║    (HTTP, scripts — fuera
+   ║                                                           ║     de la VPC)
    ║                  │ output opcional                        ║
    ║                  ▼                                        ║
    ║         ┌──────────────────┐                              ║
@@ -1208,7 +1209,7 @@ Estas las contestas en el **REPORTE.md**. La guía te lleva paso a paso a las re
    Plataforma lateral (fuera de la VPC):
      ECR (mirror de la imagen oficial dkron/dkron)
      CloudWatch Logs (logs de Dkron, Prometheus, Grafana)
-     SSM Parameter Store (DSN de RDS, credenciales)
+     SSM Parameter Store (URL del repo ECR, password de Grafana)
 
    GitHub  ──────▶  GitHub Actions ──────▶  AWS (vía OIDC, sin keys)
                        │
@@ -1221,7 +1222,7 @@ Estas las contestas en el **REPORTE.md**. La guía te lleva paso a paso a las re
 ```
 
 > 📝 **Cómo se mapea esta topología al PDF — para el reporte sección A:**
-> - **Operador, ALB, server, agent (opcional), PostgreSQL single-AZ, ECR mirror y S3 opcional** vienen del diagrama de página 11 del PDF y son la base no negociable.
+> - **Operador, ALB, server, agent (opcional), persistencia (BoltDB en EBS por restricción de Dkron OSS — ver PARTE 9.2), ECR mirror y S3 opcional** vienen del diagrama de página 11 del PDF y son la base no negociable.
 > - **EC2 + Docker Compose + Ansible** es nuestra elección dentro de la "Opción B" del PDF 5.2 (cómputo y red): el diagrama del PDF no obliga a Fargate, EC2 ni EKS — la elección es del proyecto y queda justificada en la PARTE 9.
 > - **Prometheus + Grafana en ECS Fargate (Camino 1 del PDF 5.4 "Observabilidad")** es nuestra interpretación del bloque "Logs y métricas (camino a elegir)" que aparece etiquetado así en la topología del PDF.
 > - **S3 dkron-outputs** queda como opcional siguiendo la nota del PDF página 10 ("(Opcional) Storage S3 para los outputs"). Si decides no usarlo, lo retiras del diagrama y lo justificas en el reporte.
@@ -1261,7 +1262,7 @@ Un **container** es una caja que empaqueta una aplicación con todo lo que neces
 
 > 📝 **Nota sobre la licencia de Dkron — para tu reporte sección A:** Dkron está liberado bajo **LGPL-3.0**. El PDF (final de sección 2, "Si se propone una aplicación distinta") exige licencia permisiva (MIT/Apache 2.0/BSD/MPL 2.0) **solo si propones una aplicación distinta** a las cuatro recomendadas. Como Dkron ES una de las recomendadas explícitamente por el bootcamp (Caso D), su licencia ya fue validada por el material y no necesitas justificarla. LGPL-3.0 es weak copyleft: nos cubre porque (a) no modificamos el código de Dkron — lo operamos como container; (b) no enlazamos estáticamente con su código en nuestros propios binarios. Si el evaluador pregunta, esa es la respuesta corta.
 
-**Práctica fundamental:** **pinnea** la versión. NUNCA uses `:latest`. Usa `dkron/dkron:v3.2.7`. Si usas `latest`, mañana puede cambiar y producción rompe sin que nadie lo decida.
+**Práctica fundamental:** **pinnea** la versión. NUNCA uses `:latest`. Usa `dkron/dkron:v4.0.9`. Si usas `latest`, mañana puede cambiar y producción rompe sin que nadie lo decida.
 
 ### 🧠 Analogía: Docker es como una caja de Lego prearmada
 Si tu programa es un castillo, sin Docker tienes que armar el castillo cada vez en cada laptop. Con Docker, alguien armó el castillo, lo metió en una caja sellada (imagen), y tú solo "abres la caja" (`docker run`) en cualquier máquina con Docker.
@@ -1295,8 +1296,9 @@ Esos **tags** son obligatorios (sección 5.1 del PDF). Si los olvidas, pierdes p
 ```
    Capa                 Herramienta   Qué crea/configura
    ─────────────────    ───────────   ──────────────────────────────────
-   Infraestructura      Terraform     VPC, subnets, EC2, RDS, ALB, ECR,
-   (afuera de la VM)                  IAM, security groups, ECS Fargate
+   Infraestructura      Terraform     VPC, subnets, EC2 (+ volumen EBS
+   (afuera de la VM)                  para BoltDB), ALB, ECR, IAM,
+                                      security groups, ECS Fargate
                                       (Prom/Grafana), SSM Parameters
    ─────────────────    ───────────   ──────────────────────────────────
    Configuración        Ansible       Docker engine, docker-compose.yml,
@@ -1346,8 +1348,9 @@ ALB (subnet pública)
 │        │                              opcional · puede ser │
 │        │ state                        el mismo nodo        │
 │        ▼                                  │                │
-│    RDS PostgreSQL single-AZ               │ ejecución      │
-│    (jobs e histórico)                     │                │
+│    BoltDB embebido (vol EBS gp3)          │ ejecución      │
+│    /var/lib/dkron-data en la EC2          │                │
+│    → /dkron.data dentro del container     │                │
 └───────────────────────────────────────────┼────────────────┘
                                             │
        Targets de los jobs (HTTP, scripts)  ◀─ fuera de la VPC
@@ -1355,15 +1358,15 @@ ALB (subnet pública)
 
 Plataforma lateral: ECR (mirror) · CloudWatch Logs · SSM Parameter Store
 ```
-**Lectura rápida**: solo el ALB es público; server y agent viven en privada; la base de datos solo recibe del SG de la EC2; los targets (lo que Dkron ejecuta) son externos por naturaleza — esa frontera la respetamos con un security group de egreso explícito.
+**Lectura rápida**: solo el ALB es público; server y agent viven en privada; el estado vive en BoltDB local sobre un volumen EBS encriptado en la propia EC2 (no hay BD externa); los targets (lo que Dkron ejecuta) son externos por naturaleza — esa frontera la respetamos con un security group de egreso explícito.
 
 ## ❓ 2.7 ¿Qué es ECR y por qué replicar la imagen?
 **ECR (Elastic Container Registry)** es Docker Hub privado de AWS. La sección 3 dice: **replica la imagen oficial de Dkron a tu ECR**. Razón: si Docker Hub se cae o cambian políticas, tu producción no depende de un tercero.
 
 ```bash
-docker pull dkron/dkron:v3.2.7
-docker tag dkron/dkron:v3.2.7 123456789.dkr.ecr.us-east-1.amazonaws.com/dkron:v3.2.7
-docker push 123456789.dkr.ecr.us-east-1.amazonaws.com/dkron:v3.2.7
+docker pull dkron/dkron:v4.0.9
+docker tag dkron/dkron:v4.0.9 123456789.dkr.ecr.us-east-1.amazonaws.com/dkron:v4.0.9
+docker push 123456789.dkr.ecr.us-east-1.amazonaws.com/dkron:v4.0.9
 ```
 
 Esto lo automatizarás en el pipeline.
@@ -1384,10 +1387,10 @@ Esto lo automatizarás en el pipeline.
 
 > **Trade-off honesto que vas al reporte:** mantener dos modelos de cómputo en el mismo proyecto **añade complejidad operativa** (dos formas de hacer "deploy", dos formas de leer logs, dos formas de hacer rollback). Lo aceptamos porque la sección B del reporte pide diferenciar IaC vs gestión de configuración con aplicación concreta — sin EC2+Ansible, esa diferenciación es teórica.
 
-> 📝 **Sobre cache/cola en el Caso D — del PDF sección 5.2:** *"Cache o cola según el escenario, vía ElastiCache Redis o SQS"*. Para el **Caso D (Dkron)**, ElastiCache/SQS **no son requisitos** — Dkron no necesita cache distribuido ni cola de eventos para operar. La persistencia es solo RDS PostgreSQL. Esto es distinto del Caso A (Shlink puede usar Redis para cache), Caso B (Convoy requiere Redis o SQS para cola) y Caso C (imgproxy puede usar S3 cache). En el reporte sección A, cuando hagas el bloque "qué se eligió por componente", para "cache/cola" anota: *"No aplica al Caso D — Dkron no necesita componente asíncrono separado; la persistencia y la cola interna de jobs viven en RDS PostgreSQL."*
+> 📝 **Sobre cache/cola en el Caso D — del PDF sección 5.2:** *"Cache o cola según el escenario, vía ElastiCache Redis o SQS"*. Para el **Caso D (Dkron)**, ElastiCache/SQS **no son requisitos** — Dkron no necesita cache distribuido ni cola de eventos para operar. La persistencia es **BoltDB embebido en la propia EC2** (sobre un volumen EBS encriptado). Esto es distinto del Caso A (Shlink puede usar Redis para cache), Caso B (Convoy requiere Redis o SQS para cola) y Caso C (imgproxy puede usar S3 cache). En el reporte sección A, cuando hagas el bloque "qué se eligió por componente", para "cache/cola" anota: *"No aplica al Caso D — Dkron no necesita componente asíncrono separado; la persistencia y la cola interna de jobs viven en el BoltDB embebido del propio binario, sobre un volumen EBS de la EC2."*
 
 ## ❓ 2.9 ¿Qué es un Security Group?
-Un **firewall virtual** alrededor de un recurso. Define qué puertos están abiertos y desde dónde. Ej: el SG de RDS solo acepta puerto 5432 desde el SG de Dkron, nadie más.
+Un **firewall virtual** alrededor de un recurso. Define qué puertos están abiertos y desde dónde. Ej: el SG-app de la EC2 con Dkron solo acepta puerto 8080 desde el SG del ALB, nadie más.
 
 ## ❓ 2.10 ¿Qué es IAM y "mínimo privilegio"?
 **IAM (Identity and Access Management)** maneja quién puede hacer qué en AWS. **Mínimo privilegio** = darle a cada componente solo los permisos que necesita. Si tu Task Role solo necesita leer un parameter de SSM, no le des `*:*`.
@@ -1434,7 +1437,7 @@ ansible-playbook -i inventories/prod/aws_ec2.yml playbooks/deploy.yml \
 ```
 
 **Concepto B.1 del reporte (IaC vs gestión de configuración) — guion para tu reflexión:**
-> "En este proyecto Terraform y Ansible no compiten, se complementan. Terraform crea la EC2, RDS, IAM, security groups, ALB y ECR — todo lo que vive en AWS. Ansible entra después, vía SSH a la EC2 ya creada, e instala Docker, sube el `docker-compose.yml` y hace `docker compose up -d`. Si llega una versión nueva de Dkron, no toco Terraform: corro de nuevo el playbook de Ansible y se actualiza solo lo necesario, sin recrear la EC2 ni la base de datos."
+> "En este proyecto Terraform y Ansible no compiten, se complementan. Terraform crea la EC2 (con su volumen EBS para BoltDB), IAM, security groups, ALB y ECR — todo lo que vive en AWS. Ansible entra después, vía SSM Session Manager a la EC2 ya creada, e instala Docker, sube el `docker-compose.yml` y hace `docker compose up -d`. Si llega una versión nueva de Dkron, no toco Terraform: corro de nuevo el playbook de Ansible y se actualiza solo lo necesario, sin recrear la EC2 ni perder el archivo BoltDB."
 
 > ✅ **Local + teoría: hecho.** A partir de aquí entras a la **fase producción AWS**. Las próximas partes (4 → 5 → 6 → 7 → 8) construyen el mismo Dkron que probaste en local, pero en AWS: bootstrap, infra Terraform, Ansible, CI/CD, observabilidad. Mismo orden copy-paste e incremental.
 
@@ -1717,11 +1720,13 @@ dkron-aws/
 │   │       ├── main.tf                 # 5.1.5 instancia los 6 módulos
 │   │       └── outputs.tf              # 5.1.6 outputs que consume Ansible
 │   │
-│   └── modules/                        # 6 módulos propios (PDF 5.1: mín. 2)
+│   └── modules/                        # 5 módulos propios (PDF 5.1: mín. 2)
 │       ├── network/                    # 5.2 — VPC + 2 pub + 2 priv + IGW + NAT
 │       ├── ecr/                        # 5.3 — Repositorio ECR (mirror)
-│       ├── storage/                    # 5.4 — RDS Postgres + S3 outputs (opcional)
-│       ├── compute/                    # 5.5 — EC2 + ALB + SGs + IAM (sin RDS/ECR)
+│       │                               # 5.4 — (eliminado: NO hay módulo storage;
+│       │                               #        persistencia local en BoltDB/EBS,
+│       │                               #        ver PARTE 5.4 y PARTE 9.2)
+│       ├── compute/                    # 5.5 — EC2 + ALB + SGs + IAM
 │       ├── monitoring/                 # 5.7/Parte 8 — Prom + Grafana en Fargate
 │       │   └── dashboards/dkron-red.json
 │       └── cicd/                       # 7.1 — OIDC + role GHA (opcional Terraform-managed)
@@ -1806,11 +1811,11 @@ __pycache__/
 .venv/
 ```
 
-> 🔐 **Detalle clave:** `*.tfvars` está ignorado pero `*.tfvars.example` no — así versionas la **plantilla** pero nunca los **valores reales** (password de RDS, etc.).
+> 🔐 **Detalle clave:** `*.tfvars` está ignorado pero `*.tfvars.example` no — así versionas la **plantilla** pero nunca los **valores reales** (password de Grafana, etc.).
 
 ### 📌 Cumplimiento PDF 5.1
 
-- ✅ "Mínimo 2 módulos propios" → tenemos **6** (network, ecr, storage, compute, monitoring, cicd).
+- ✅ "Mínimo 2 módulos propios" → tenemos **5** (network, ecr, compute, monitoring, cicd). El módulo `storage/` se eliminó cuando descubrimos que Dkron OSS no soporta backend Postgres — ver PARTE 5.4 y 9.2.
 - ✅ "State remoto en S3 con locking" → `backend.tf` con `use_lockfile = true` (S3-native lock, no DynamoDB).
 - ✅ "Tags obligatorios" → `default_tags` en el provider (5.1.1).
 - ✅ "Sin recursos huérfanos en destroy" → el bucket S3 y el OIDC viven fuera del state (creados por `bootstrap*.sh`); todo lo que crea Terraform lo destruye Terraform.
@@ -1832,7 +1837,7 @@ git push -u origin main
 
 ## 🗺️ Diagrama: la arquitectura AWS completa con security groups
 
-> 📐 **Base de este diagrama:** topología sugerida del Escenario D (PDF página 11). Mantenemos sus componentes obligatorios — ALB en pública, server + agent (opcional) en privada, RDS single-AZ, ECR mirror, S3 outputs opcional, targets externos — y le añadimos el detalle de security groups que el PDF deja explícitamente como decisión del proyecto (cita del propio PDF, sección 2: *"los detalles operativos (cantidad de réplicas, esquemas de IAM, security groups, tags, configuración del ALB, dimensionamiento de la base de datos) se diseñan y justifican como parte del proyecto"*).
+> 📐 **Base de este diagrama:** topología sugerida del Escenario D (PDF página 11). Mantenemos sus componentes obligatorios — ALB en pública, server + agent (opcional) en privada, **persistencia local en BoltDB sobre EBS** (Dkron OSS no soporta el flag Postgres — ver PARTE 9.2), ECR mirror, S3 outputs opcional, targets externos — y le añadimos el detalle de security groups que el PDF deja explícitamente como decisión del proyecto (cita del propio PDF, sección 2: *"los detalles operativos (cantidad de réplicas, esquemas de IAM, security groups, tags, configuración del ALB, dimensionamiento de la base de datos) se diseñan y justifican como parte del proyecto"*).
 
 ```
                             INTERNET (0.0.0.0/0)
@@ -1854,7 +1859,7 @@ git push -u origin main
    │  │ subnets públicas │     │ subnet privada-a 10.20.10.0/24 │    │
    │  │ a: 10.20.0.0/24  │     │                                │    │
    │  │ b: 10.20.1.0/24  │     │  ╔═════════════════════════╗   │    │
-   │  │  [Internet GW]   │     │  ║ EC2 (t3.small) — Dkron  ║   │    │
+   │  │  [Internet GW]   │     │  ║ EC2 (t3.micro) — Dkron  ║   │    │
    │  │  [NAT Gateway]──┐│     │  ║  Docker Compose v2:     ║   │    │
    │  │  [ALB]          ││     │  ║   • dkron-server :8080  ║   │    │
    │  └─────────────────┼┘     │  ║       (scheduler)       ║◀──┼─┐  │
@@ -1862,16 +1867,15 @@ git push -u origin main
    │                    │      │  ║       OPCIONAL · mismo  ║   │ │  │
    │                    │      │  ║       proceso o aparte  ║   │ │  │
    │                    │      │  ║   • node_exporter :9100 ║   │ │  │
-   │                    │      │  ║  cfg por ANSIBLE (SSH)  ║   │ │  │
+   │                    │      │  ║  cfg por ANSIBLE (SSM)  ║   │ │  │
    │                    │      │  ║  SG-app                 ║   │ │  │
-   │                    │      │  ╚═════════╤═══════════════╝   │ │  │
-   │                    │      │            │ :5432             │ │  │
-   │                    │      │            ▼                   │ │  │
-   │                    │      │  ╔═════════════════════════╗   │ │  │
-   │                    │      │  ║ RDS PostgreSQL          ║   │ │  │
-   │                    │      │  ║ single-AZ · jobs e      ║   │ │  │
-   │                    │      │  ║ histórico               ║   │ │  │
-   │                    │      │  ║ SG-db (← SG-app:5432)   ║   │ │  │
+   │                    │      │  ║                         ║   │ │  │
+   │                    │      │  ║  Persistencia:          ║   │ │  │
+   │                    │      │  ║   BoltDB embebido en    ║   │ │  │
+   │                    │      │  ║   /dkron.data (mount    ║   │ │  │
+   │                    │      │  ║   del vol EBS gp3 enc.  ║   │ │  │
+   │                    │      │  ║   en /var/lib/dkron-    ║   │ │  │
+   │                    │      │  ║   data del host)        ║   │ │  │
    │                    │      │  ╚═════════════════════════╝   │ │  │
    │                    │      │                                │ │  │
    │                    │      │  ╔═════════════════════════╗   │ │  │
@@ -1891,7 +1895,8 @@ git push -u origin main
    │                    │      │  ╚═════════════════════════╝   │    │
    │                    └─────▶│                                │    │
    │                           │ subnet privada-b 10.20.11.0/24 │    │
-   │                           │ (réplica AZ exigida por RDS)   │    │
+   │                           │ (réplica AZ exigida por ALB    │    │
+   │                           │  y por Fargate multi-AZ)       │    │
    │                           └────────────────────────────────┘    │
    └─────────────────────────────────────────────────────────────────┘
 
@@ -1899,7 +1904,8 @@ git push -u origin main
   │  Servicios laterales (fuera de la VPC):                          │
   │                                                                  │
   │   ECR (mirror imagen oficial dkron/dkron) ◄── docker pull        │
-  │   SSM Parameter Store (DSN)               ◄── leído por Ansible  │
+  │   SSM Parameter Store                     ◄── URL del repo ECR +  │
+  │     (/dkron/prod/image_repo, etc.)            password de Grafana │
   │   CloudWatch Logs                         ◄── logs Dkron/Prom/Graf│
   │   EFS                                     ◄── persistencia Prom+Graf│
   │   SNS Topic dkron-alerts                  ◄── Alertmanager → email│
@@ -1917,14 +1923,14 @@ git push -u origin main
 2. El **ALB** (en las **dos** subnets públicas — AWS exige mínimo 2 AZs para crearlo) reenvía cada listener a su target group correspondiente. Dkron usa target type `instance` (apunta a la EC2 por su instance-id); Grafana usa `ip` (apunta a la task de Fargate).
 3. **EC2 con Dkron** vive en subnet privada — Internet NO le habla directo. Le habla solo el ALB.
 4. La **EC2 corre Docker Compose** con el container de Dkron en modo `--server` (scheduler) y, en el mismo proceso o como container separado, el rol `agent` que **ejecuta** los runs — la imagen del PDF página 11 marca el agent como "opcional · puede ser el mismo nodo". Justificamos la elección en la PARTE 9 (Decisión 1bis). Ansible es quien instala Docker, copia el compose y arranca los containers (vía SSH desde el runner de CI o desde tu laptop).
-5. Dkron habla a **RDS** en 5432; RDS solo acepta tráfico desde el SG-app de la EC2.
+5. Dkron persiste el estado en **BoltDB local** (archivo `/dkron.data` dentro del container, montado desde `/var/lib/dkron-data` del host sobre el volumen EBS de la EC2). **No hay BD externa, no hay puerto 5432 abierto, no hay SG-db** — esto se simplificó cuando descubrimos en producción que Dkron OSS no soporta el flag `--store=postgres` (ver PARTE 9.2 y PARTE 11.2).
 6. **Prometheus (en Fargate)** scrapea Dkron en la IP privada de la EC2 cada 30s — el bridge cross-compute lo explica la PARTE 8; Grafana consulta a Prometheus.
 7. **Alertmanager** dispara alertas vía webhook → Lambda → **SNS** → tu email.
 8. Logs: la EC2 manda los logs de los containers a **CloudWatch Logs** vía el agent de CloudWatch (lo configura Ansible). Prometheus/Grafana en Fargate ya escriben a CloudWatch nativo. Datos de Prometheus/Grafana persisten en **EFS**.
 9. **NAT Gateway**: la EC2 lo usa para hacer `docker pull` desde ECR cuando Ansible despliega; también para que el **agent llegue a los targets externos** (HTTP, scripts en otras APIs) y, si decides usarlo, para escribir los **outputs en S3 dkron-outputs** vía VPC endpoint o Internet; las tasks de Fargate también lo usan.
 10. **S3 dkron-outputs es OPCIONAL** (PDF página 10): si lo activas, el `agent` escribe ahí el stdout/stderr de cada run con `output_size_limit` controlado; si no, los outputs van solo a CloudWatch Logs vía driver `awslogs`. La decisión queda registrada en el reporte sección A.
 
-**Regla de seguridad simple para recordar:** "el firewall de cada cosa solo abre el puerto necesario, y solo desde quien debe llamar." ALB se abre a Internet, EC2 (puerto 8080) solo al ALB, EC2 (puerto 22 SSH) solo a la IP del runner de GitHub Actions o a tu IP, RDS solo al SG-app de la EC2, Prometheus scrapea la IP privada de la EC2 en 8080 y 9100, Grafana solo consulta a Prometheus, **el agent tiene egreso a Internet vía NAT solo a los hosts permitidos** (lo justificas en el reporte si abres `0.0.0.0/0` por simplicidad).
+**Regla de seguridad simple para recordar:** "el firewall de cada cosa solo abre el puerto necesario, y solo desde quien debe llamar." ALB se abre a Internet, EC2 (puerto 8080) solo al ALB, EC2 (puerto 22 SSH) solo a la IP del runner de GitHub Actions o a tu IP, Prometheus scrapea la IP privada de la EC2 en 8080 y 9100, Grafana solo consulta a Prometheus, **el agent tiene egreso a Internet vía NAT solo a los hosts permitidos** (lo justificas en el reporte si abres `0.0.0.0/0` por simplicidad). **No hay regla 5432** — la persistencia es BoltDB local, no hay puerto de BD que abrir.
 
 ## ❓ 5.1 ¿Por dónde empiezo? — Los 6 archivos de `infra/envs/prod/`
 
@@ -2020,7 +2026,7 @@ variable "azs" {
 
 variable "dkron_image_tag" {
   type        = string
-  default     = "v3.2.7"
+  default     = "v4.0.9"
   description = "Tag de la imagen Dkron a usar (pinneada, NUNCA :latest). Lo consume Ansible vía --extra-vars; Terraform lo declara para que aparezca en terraform.tfvars como única fuente de verdad del proyecto."
 }
 
@@ -2028,12 +2034,6 @@ variable "instance_type" {
   type        = string
   default     = "t3.micro"
   description = "Free tier 12 meses. Si Dkron hace OOM sube a t3.small (~$15/mes)."
-}
-
-variable "db_password" {
-  type        = string
-  sensitive   = true
-  description = "Password de RDS Postgres. Mín. 16 chars, sin / @ \" o espacios."
 }
 
 variable "ssh_public_key" {
@@ -2052,12 +2052,6 @@ variable "github_repo" {
   description = "GitHub repo (owner/repo). Lo consume bootstrap-oidc.sh y se referencia en el CI vía ${github.repository}. Si NO usas el módulo cicd opcional, esta var queda declarada pero sin uso en Terraform — es OK, sirve para documentar la dependencia en un solo lugar."
 }
 
-variable "enable_s3_outputs" {
-  type        = bool
-  default     = false
-  description = "Caso D opcional: bucket S3 para outputs de jobs. Decisión 9.6 del reporte."
-}
-
 variable "alert_email" {
   type        = string
   description = "Email destino del topic SNS de alertas Prometheus."
@@ -2072,11 +2066,9 @@ variable "alert_email" {
 # terraform.tfvars está en .gitignore — NUNCA lo subas.
 
 owner                  = "tunombre"
-db_password            = "Cambia-Esto-Por-Algo-Largo-y-Random-123!"
 ssh_public_key         = "ssh-ed25519 AAAA... tunombre@laptop"
 ssh_allowed_cidrs      = []                          # vacío = SSH cerrado
 github_repo            = "tunombre/dkron-aws"        # owner/repo (usado por CI/CD)
-enable_s3_outputs      = false                       # true si persistes outputs en S3
 alert_email            = "tu-correo@gmail.com"
 grafana_admin_password = "Cambia-Esto-También-Por-Algo-Largo-123!"
 ```
@@ -2096,10 +2088,12 @@ Lo iremos llenando módulo por módulo en 5.2 → 5.7. **Por ahora créalo vací
 
 ```hcl
 # infra/envs/prod/main.tf
-# Aquí instanciamos los 6 módulos. Lo construiremos incremental:
+# Aquí instanciamos los módulos. Lo construiremos incremental:
 #  5.2 → module "network"
 #  5.3 → module "ecr"
-#  5.4 → module "storage"
+#  5.4 → (NO hay módulo "storage" — ver explicación en PARTE 5.4:
+#         Dkron OSS no soporta backend Postgres, persistencia = BoltDB
+#         sobre el EBS root de la EC2)
 #  5.5 → module "compute"
 #  5.6 → module "cicd"  (referencia documental — OIDC se crea por script)
 #  5.7 → module "monitoring"
@@ -2161,7 +2155,7 @@ Alternativa (Terraform 1.6–1.9): crea una tabla DynamoDB `tfstate-locks` y cam
 
 > 🧠 **Por qué 2 + 2 subnets:**
 > - **2 públicas**: requisito **inflexible** del ALB (AWS no permite crear un ALB con una sola subnet — necesita 2 en AZs distintas para tolerancia a fallos del propio ALB).
-> - **2 privadas**: requisito **inflexible** de RDS (te exige `db_subnet_group` con ≥ 2 AZs, aun siendo single-AZ).
+> - **2 privadas**: dejamos 2 AZ aunque la EC2 vive en 1 sola, para que el ALB tenga un target group con tolerancia futura y para alojar Fargate (Prom/Graf) en multi-AZ. Originalmente la justificación era RDS (que exigía `db_subnet_group` con ≥ 2 AZs); ya no usamos RDS pero mantenemos las 2 privadas por las razones anteriores.
 > - **NAT en una sola AZ** (la primera pública): para abaratar (NAT en 2 AZs duplica el costo, ~$64/mes). Tradeoff aceptado: si cae la AZ del NAT, las privadas pierden egreso. Lo documentas en el reporte.
 > - **Offset `+10`**: `cidrsubnet(var.vpc_cidr, 8, count.index + 10)` para que las privadas sean `10.20.10.0/24` y `10.20.11.0/24`, lejos de las públicas `10.20.0.0/24` y `10.20.1.0/24`. Facilita debugging cuando ves una IP en CloudTrail (sabes pública vs privada de un vistazo).
 
@@ -2181,7 +2175,7 @@ Alternativa (Terraform 1.6–1.9): crea una tabla DynamoDB `tfstate-locks` y cam
 > 🧠 **Conceptualmente — la distinción public/private es CRÍTICA:**
 >
 > - **Public subnet** tiene una ruta `0.0.0.0/0 → IGW`. Cualquier recurso aquí puede salir a Internet **Y** ser alcanzable desde Internet (con su IP pública). Aquí vive el ALB y la NAT Gateway.
-> - **Private subnet** tiene una ruta `0.0.0.0/0 → NAT`. Los recursos aquí pueden salir a Internet (para `docker pull`, log a CloudWatch, etc.) pero **NO son alcanzables desde Internet**. Aquí viven la EC2 con Dkron, las tasks Fargate de Prom/Graf y RDS — todo lo "sensible" sin exposición pública.
+> - **Private subnet** tiene una ruta `0.0.0.0/0 → NAT`. Los recursos aquí pueden salir a Internet (para `docker pull`, log a CloudWatch, etc.) pero **NO son alcanzables desde Internet**. Aquí viven la EC2 con Dkron y las tasks Fargate de Prom/Graf — todo lo "sensible" sin exposición pública.
 
 ### 📋 `infra/modules/network/variables.tf` (copy-paste)
 
@@ -2226,7 +2220,7 @@ resource "aws_subnet" "public" {
   tags                    = { Name = "${var.project}-public-${count.index}" }
 }
 
-# ───── Subnets PRIVADAS (EC2/Fargate/RDS viven aquí) ─────
+# ───── Subnets PRIVADAS (EC2 con Dkron + tasks Fargate Prom/Graf viven aquí) ─────
 resource "aws_subnet" "private" {
   count             = 2
   vpc_id            = aws_vpc.main.id
@@ -2474,227 +2468,53 @@ docker push "$ECR_URL:v3.2.7"
 
 ---
 
-## ❓ 5.4 Módulo `storage/` — RDS PostgreSQL + S3 outputs (opcional)
+## ❓ 5.4 (Eliminado) Persistencia — decisión BoltDB embebido
 
-> 🧠 **Decisión del Caso D (9.2 del reporte):** el PDF dice "BoltDB local **o** PostgreSQL". Elegimos **PostgreSQL en RDS** — la persistencia sobrevive a la recreación de la EC2 (Ansible/Terraform pueden hacer redeploy sin perder histórico de jobs).
->
-> 🧠 **Caso D 9.6 (opcional):** el bucket S3 para outputs es **opcional**. Lo hacemos condicionado por `var.enable_s3_outputs`.
+> 🧠 **Esta sección originalmente describía un módulo `storage/` con RDS PostgreSQL + un SSM SecureString con el DSN + un bucket S3 opcional para outputs. Lo eliminamos.** Aquí queda solo la explicación de por qué, para que el reporte y el runbook tengan continuidad.
 
-### 🖱️ Equivalente en AWS Console
+**Qué había antes:** un módulo Terraform que aprovisionaba:
+- `aws_db_instance.dkron` — RDS PostgreSQL `db.t3.micro` single-AZ.
+- `aws_db_subnet_group.this` — grupo de subnets para RDS (exigía 2 AZs).
+- `aws_security_group.db` — SG con regla `ingress 5432` desde el SG-app.
+- `aws_ssm_parameter.dsn` — SecureString con el DSN `postgres://...` que Ansible inyectaba al `.env` del compose.
+- Un bucket S3 opcional para outputs de jobs.
 
-| Recurso Terraform | Servicio | Que harías click-a-click |
+**Por qué lo quitamos — descubrimiento real en producción (ver PARTE 11.2):**
+
+1. **Dkron OSS v4 no soporta backend Postgres.** Los flags `--store=postgres`, `--backend=postgres` y `--dsn=...` **solo existen en Dkron Pro** (la versión comercial). El binario OSS no reconoce esos flags: imprime el listado completo de opciones de `agent --help` y sale con código 1. El container queda en `Restarting (1)` infinito.
+2. Verificación directa: `docker run --rm dkron/dkron:v4.0.9 agent --help | grep -iE 'store|backend|dsn|postgres'` devuelve **vacío**. Ninguno de esos flags existe en el binario OSS.
+3. Resultado: gastábamos ~$15/mes de RDS + un SecureString + un SG + 5 minutos de apply en algo que el binario nunca iba a usar.
+
+**Qué hicimos en su lugar — BoltDB embebido sobre EBS:**
+
+- Dkron arranca con `--data-dir=/dkron.data` (BoltDB es el default).
+- El compose monta el host directory `/var/lib/dkron-data` (dentro del volumen root EBS de la EC2) sobre `/dkron.data` del container.
+- El volumen root EBS está `encrypted = true` y es `gp3` (ver `infra/modules/compute/main.tf`, bloque `root_block_device`).
+- El `.env` ya no necesita `DKRON_DSN`. El archivo `env.j2` queda casi vacío (solo `DKRON_LOG_LEVEL`).
+
+**Tradeoffs aceptados (escríbelos en el reporte sección A):**
+
+| Aspecto | RDS Postgres (lo que íbamos a hacer) | BoltDB en EBS (lo que hacemos) |
 |---|---|---|
-| `aws_security_group.db` | 🌐 VPC | **VPC → Security groups → Create** → Name: `dkron-db-sg` → Description: "RDS Postgres — ingress 5432 lo añade compute" → VPC: dkron-vpc → **NO añadas ingress aquí** — la regla 5432 desde el SG-app la crea el módulo `compute` con un `aws_security_group_rule` aparte para romper el ciclo storage↔compute → Sin egress explícito (RDS no inicia conexiones salientes) → Create. |
-| `aws_db_subnet_group.this` | 🗄️ RDS | **RDS → Subnet groups → Create DB subnet group** → Name: `dkron-db-subnets` → VPC: dkron-vpc → Availability Zones: `us-east-1a`, `us-east-1b` → Subnets: las dos privadas (`10.20.10.0/24`, `10.20.11.0/24`). |
-| `aws_db_instance.dkron` | 🗄️ RDS | **RDS → Databases → Create database** → Standard create → Engine: **PostgreSQL 15.7** → Template: Free tier → DB instance ID: `dkron-prod` → Master username: `dkronadmin` → Master password: el de tu `terraform.tfvars` → DB instance class: `db.t3.micro` → Allocated storage: 20 GB → Storage type: **gp3** → **Storage encryption: Enable** → Connectivity: VPC `dkron-vpc`, Public access: **No**, Subnet group: `dkron-db-subnets`, VPC SG: `dkron-db-sg`, AZ: No preference → Database authentication: Password → Additional configuration: Initial database name: `dkron`, **Backup retention period: 0 days**, **Enable deletion protection: NO**, **Apply immediately: Yes**. Al borrar luego: marca **Skip final snapshot**. |
-| `aws_ssm_parameter.dsn` | 🔐 SSM | **Systems Manager → Parameter Store → Create parameter** → Name: `/dkron/prod/dsn` → Tier: Standard → Type: **SecureString** → KMS key: alias/aws/ssm → Value: `postgres://dkronadmin:<password>@<rds-endpoint>:5432/dkron?sslmode=require` (compón el string con el endpoint que devolvió RDS) → Tags: `Name=dkron-dsn` → Create. |
-| `aws_s3_bucket.outputs` (opcional, `var.enable_s3_outputs=true`) | 🪣 S3 | **S3 → Buckets → Create bucket** → Name: `dkron-outputs-tunombre-prod` → Region: us-east-1 → ACLs disabled → Create. |
-| `aws_s3_bucket_versioning.outputs` | 🪣 S3 | El bucket → **Properties → Bucket Versioning → Edit → Enable**. |
-| `aws_s3_bucket_server_side_encryption_configuration.outputs` | 🪣 S3 | El bucket → **Properties → Default encryption → Edit** → SSE-S3 (AES-256). |
-| `aws_s3_bucket_public_access_block.outputs` | 🪣 S3 | El bucket → **Permissions → Block public access → Edit** → marca **las 4 opciones**. |
-| `aws_s3_bucket_lifecycle_configuration.outputs` | 🪣 S3 | El bucket → **Management → Lifecycle rules → Create lifecycle rule** → Name: `archive-old-outputs` → Scope: aplica a todos los objetos → **Lifecycle rule actions:** Move to Glacier Instant Retrieval **after 30 days**, Expire **after 365 days** → Save. |
+| Disponibilidad si la EC2 muere | Estado sobrevive (RDS independiente) | Estado vive en EBS del EC2; si destruyes EC2 sin snapshot, pierdes histórico |
+| Costo extra | ~$15/mes | $0 (sobre el EBS root de 20 GB ya pagado) |
+| Backups | Snapshots automáticos RDS | Snapshots EBS manuales o vía DLM (opcional, ver runbook R1) |
+| Compatibilidad Dkron OSS | ❌ no soporta el flag | ✅ es el default |
+| Complejidad infra | Módulo storage + SG-db + SSM SecureString + 2 AZ privadas obligadas | Cero — solo el volumen EBS root de la EC2 |
 
-### 📋 `infra/modules/storage/variables.tf` (copy-paste)
+**Mitigación de durabilidad (opcional):** activa **AWS DLM (Data Lifecycle Manager)** con una policy diaria del volumen EBS de la EC2 — son ~$0.05/mes por snapshot. Procedimiento en `docs/runbook.md` (R1: snapshot manual + restore).
 
-```hcl
-# infra/modules/storage/variables.tf
-variable "project"            { type = string }
-variable "environment"        { type = string }
-variable "owner"              { type = string }
-variable "vpc_id"             { type = string }
-variable "private_subnet_ids" { type = list(string) }
-variable "db_password" {
-  type      = string
-  sensitive = true
-}
-variable "enable_s3_outputs" {
-  type        = bool
-  default     = false
-  description = "Caso D 9.6 — bucket S3 para outputs de jobs Dkron."
-}
-```
+**Lo que se ahorra el repo:**
+- Módulo `infra/modules/storage/` → **eliminado** entero.
+- Variable `db_password` → eliminada de `envs/prod/variables.tf` y `terraform.tfvars.example`.
+- Variable `enable_s3_outputs` → eliminada (el bucket opcional se puede recrear más adelante si hace falta).
+- Outputs `rds_endpoint`, `dsn_parameter_name`, `s3_outputs_bucket_name` → eliminados de `envs/prod/outputs.tf`.
+- Regla `aws_security_group_rule.db_from_app` → eliminada del módulo compute (no hay BD que abrir).
+- Policy IAM `ec2_ssm_dsn` → eliminada (la EC2 ya no necesita leer `/dkron/prod/dsn`).
 
-### 📋 `infra/modules/storage/main.tf` (copy-paste)
+**Cómo se ve hoy en `envs/prod/main.tf`:** **no hay `module "storage"`**. El árbol queda con 5 módulos en vez de 6 (network, ecr, compute, monitoring, cicd).
 
-```hcl
-# infra/modules/storage/main.tf
-
-# ───── Security Group para RDS ─────
-# La regla ingress 5432 desde el SG de la app la crea el módulo `compute`
-# con aws_security_group_rule — así rompemos la dependencia circular
-# storage↔compute y cada uno se puede aplicar incrementalmente.
-resource "aws_security_group" "db" {
-  name        = "${var.project}-db-sg"
-  description = "RDS Postgres — ingress 5432 lo añade compute"
-  vpc_id      = var.vpc_id
-
-  # Sin egress explícito: RDS no inicia conexiones salientes.
-  tags = { Name = "${var.project}-db-sg" }
-}
-
-# ───── DB Subnet Group (RDS exige 2 AZs) ─────
-resource "aws_db_subnet_group" "this" {
-  name       = "${var.project}-db-subnets"
-  subnet_ids = var.private_subnet_ids
-  tags       = { Name = "${var.project}-db-subnets" }
-}
-
-# ───── RDS PostgreSQL ─────
-resource "aws_db_instance" "dkron" {
-  identifier             = "${var.project}-prod"
-  engine                 = "postgres"
-  engine_version         = "15.7"
-  instance_class         = "db.t3.micro"
-  allocated_storage      = 20
-  storage_type           = "gp3"
-  storage_encrypted      = true
-  username               = "dkronadmin"
-  password               = var.db_password
-  db_name                = "dkron"
-  multi_az               = false
-  publicly_accessible    = false
-  skip_final_snapshot    = true
-  deletion_protection    = false
-  backup_retention_period = 0       # alcance proyecto; en prod real, 7+
-  db_subnet_group_name   = aws_db_subnet_group.this.name
-  vpc_security_group_ids = [aws_security_group.db.id]
-
-  apply_immediately = true
-}
-
-# ───── SSM Parameter Store: DSN inyectada por Ansible al .env ─────
-resource "aws_ssm_parameter" "dsn" {
-  name = "/${var.project}/${var.environment}/dsn"
-  type = "SecureString"
-  value = format(
-    "postgres://%s:%s@%s:5432/%s?sslmode=require",
-    aws_db_instance.dkron.username,
-    var.db_password,
-    aws_db_instance.dkron.address,
-    aws_db_instance.dkron.db_name
-  )
-
-  tags = { Name = "${var.project}-dsn" }
-}
-
-# ───── S3 outputs (OPCIONAL — Caso D 9.6) ─────
-resource "aws_s3_bucket" "outputs" {
-  count         = var.enable_s3_outputs ? 1 : 0
-  bucket        = "${var.project}-outputs-${var.owner}-${var.environment}"
-  force_destroy = true   # permite `terraform destroy` aunque tenga objetos (alcance proyecto)
-  tags          = { Name = "${var.project}-outputs" }
-}
-
-resource "aws_s3_bucket_versioning" "outputs" {
-  count  = var.enable_s3_outputs ? 1 : 0
-  bucket = aws_s3_bucket.outputs[0].id
-  versioning_configuration { status = "Enabled" }
-}
-
-resource "aws_s3_bucket_server_side_encryption_configuration" "outputs" {
-  count  = var.enable_s3_outputs ? 1 : 0
-  bucket = aws_s3_bucket.outputs[0].id
-  rule {
-    apply_server_side_encryption_by_default { sse_algorithm = "AES256" }
-  }
-}
-
-resource "aws_s3_bucket_public_access_block" "outputs" {
-  count                   = var.enable_s3_outputs ? 1 : 0
-  bucket                  = aws_s3_bucket.outputs[0].id
-  block_public_acls       = true
-  ignore_public_acls      = true
-  block_public_policy     = true
-  restrict_public_buckets = true
-}
-
-# Lifecycle: outputs viejos al glaciar para abaratar
-resource "aws_s3_bucket_lifecycle_configuration" "outputs" {
-  count  = var.enable_s3_outputs ? 1 : 0
-  bucket = aws_s3_bucket.outputs[0].id
-
-  rule {
-    id     = "archive-old-outputs"
-    status = "Enabled"
-    filter {}
-    transition {
-      days          = 30
-      storage_class = "GLACIER_IR"
-    }
-    expiration {
-      days = 365
-    }
-  }
-}
-```
-
-### 📋 `infra/modules/storage/outputs.tf` (copy-paste)
-
-```hcl
-# infra/modules/storage/outputs.tf
-output "rds_endpoint"      { value = aws_db_instance.dkron.address }
-output "rds_port"          { value = aws_db_instance.dkron.port }
-output "rds_db_name"       { value = aws_db_instance.dkron.db_name }
-output "db_security_group_id" { value = aws_security_group.db.id }
-output "dsn_parameter_name" { value = aws_ssm_parameter.dsn.name }
-output "dsn_parameter_arn"  { value = aws_ssm_parameter.dsn.arn }
-
-output "s3_outputs_bucket_name" {
-  value       = var.enable_s3_outputs ? aws_s3_bucket.outputs[0].id : null
-  description = "Nombre del bucket S3 de outputs (null si deshabilitado)."
-}
-
-output "s3_outputs_bucket_arn" {
-  value       = var.enable_s3_outputs ? aws_s3_bucket.outputs[0].arn : null
-}
-```
-
-### 🔌 Instancia el módulo en `infra/envs/prod/main.tf`
-
-```hcl
-# infra/envs/prod/main.tf  (añadir)
-
-module "storage" {
-  source             = "../../modules/storage"
-  project            = var.project
-  environment        = var.environment
-  owner              = var.owner
-  vpc_id             = module.network.vpc_id
-  private_subnet_ids = module.network.private_subnet_ids
-  db_password        = var.db_password
-  enable_s3_outputs  = var.enable_s3_outputs
-}
-```
-
-Y al `outputs.tf`:
-
-```hcl
-# infra/envs/prod/outputs.tf  (añadir)
-
-output "rds_endpoint"           { value = module.storage.rds_endpoint }
-output "dsn_parameter_name"     { value = module.storage.dsn_parameter_name }
-output "s3_outputs_bucket_name" { value = module.storage.s3_outputs_bucket_name }
-```
-
-### 🧪 Aplica solo el módulo storage para validar incrementalmente
-
-```bash
-cd infra/envs/prod
-terraform apply -target=module.storage -auto-approve
-```
-
-Tarda ~5–7 min (RDS es lo que más demora). Verifica:
-
-```bash
-aws rds describe-db-instances \
-  --db-instance-identifier dkron-prod \
-  --query "DBInstances[].{Status:DBInstanceStatus,Endpoint:Endpoint.Address}" --output table
-
-aws ssm get-parameter --name /dkron/prod/dsn --with-decryption \
-  --query "Parameter.Value" --output text | sed 's/:[^@]*@/:***@/'
-```
-
-> 🧠 **Por qué storage se aplica sin compute:** quitamos el `app_sg_id` del módulo. La regla `ingress 5432` sobre el SG-db la añade **compute** (en 5.5) con `aws_security_group_rule`. Así rompemos el ciclo y cada módulo es independiente.
+> 📝 **Para el reporte (9.2):** la pregunta del PDF "¿BoltDB local o PostgreSQL?" sigue siendo válida — solo que la respuesta correcta para **Dkron OSS** es **BoltDB es la única opción real**. Documentar esta restricción de la herramienta es valioso: muestra que verificaste la matriz de features OSS vs Pro antes de comprometerte con una arquitectura.
 
 ---
 
@@ -2708,13 +2528,11 @@ aws ssm get-parameter --name /dkron/prod/dsn --with-decryption \
 |---|---|---|
 | `aws_security_group.alb` | 🌐 VPC | **VPC → Security groups → Create** → Name: `dkron-alb-sg` → VPC: dkron-vpc → Inbound: HTTP 80 from `0.0.0.0/0`, HTTP 3000 from `0.0.0.0/0` → Outbound: all traffic → Create. |
 | `aws_security_group.app` | 🌐 VPC | **VPC → Security groups → Create** → Name: `dkron-app-sg` → VPC: dkron-vpc → Inbound: TCP 8080 from SG `dkron-alb-sg` (y SSH 22 desde `ssh_allowed_cidrs` solo si la lista NO está vacía — dynamic block). El puerto 9100 (node_exporter) lo abre `monitoring` con una regla aparte → Outbound: all traffic → Create. |
-| `aws_security_group_rule.db_from_app` | 🌐 VPC | Sobre el SG **`dkron-db-sg`** (creado en 5.4) → **Edit inbound rules → Add rule** → Type: Custom TCP, Port: **5432**, Source: SG `dkron-app-sg`, Description: "Postgres desde app" → Save. Esta regla vive en `compute` (no en `storage`) para romper el ciclo storage↔compute. |
 | `aws_key_pair.this` | 💻 EC2 | **EC2 → Network & Security → Key pairs → Actions → Import key pair** → Name: `dkron-key` → Pega tu `~/.ssh/id_ed25519.pub` → Import key pair. |
 | `data.aws_ssm_parameter.al2023` | 🔐 SSM | **No es creación** — Terraform solo lee el parámetro público `/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64` para obtener el AMI ID actual. En consola lo verás al elegir "Amazon Linux 2023 AMI" en el wizard de EC2. |
 | `aws_iam_role.ec2` | 🔐 IAM | **IAM → Roles → Create role** → Trusted entity type: AWS service → Use case: **EC2** → Next (sin marcar policies aún) → Role name: `dkron-ec2-role` → Create role. |
 | `aws_iam_role_policy.ec2_ecr` (inline) | 🔐 IAM | En el rol `dkron-ec2-role` → **Add permissions → Create inline policy → JSON** → permite `ecr:GetAuthorizationToken` sobre `*` y `ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer`, `ecr:BatchCheckLayerAvailability` sobre el ARN del repo `dkron-dkron`. |
-| `aws_iam_role_policy.ec2_ssm_dsn` (inline) | 🔐 IAM | Mismo rol → **Add permissions → Create inline policy → JSON** → `ssm:GetParameter`, `ssm:GetParameters`, `kms:Decrypt` sobre los ARN de `/dkron/prod/dsn` (SecureString) y `/dkron/prod/image_repo`. |
-| `aws_iam_role_policy.ec2_s3_outputs` (inline, opcional) | 🔐 IAM | Solo si `enable_s3_outputs=true`: mismo rol → **Create inline policy → JSON** → `s3:PutObject`, `s3:GetObject` sobre `arn:aws:s3:::dkron-outputs-tunombre-prod/*`. |
+| `aws_iam_role_policy.ec2_ssm_read` (inline) | 🔐 IAM | Mismo rol → **Add permissions → Create inline policy → JSON** → `ssm:GetParameter`, `ssm:GetParameters` sobre el ARN de `/dkron/prod/image_repo` (String plano — Ansible lo lee para resolver la URL del ECR). **Ya NO necesitas `/dkron/prod/dsn` ni `kms:Decrypt`** — la persistencia es BoltDB local, no hay SecureString del DSN. |
 | `aws_s3_bucket.ansible_ssm` + `aws_s3_bucket_public_access_block.ansible_ssm` | 🪣 S3 | **S3 → Create bucket** → Name: `dkron-ansible-ssm-<accountid>` (el plugin `community.aws.aws_ssm` lo usa para transferir archivos a la EC2) → Block all public access: ON → Create. Anota el nombre. |
 | `aws_iam_role_policy.ec2_ansible_ssm` (inline) | 🔐 IAM | Mismo rol `dkron-ec2-role` → **Create inline policy → JSON** → `s3:GetObject/PutObject/DeleteObject` sobre `arn:aws:s3:::dkron-ansible-ssm-<accountid>/*` + `s3:ListBucket/GetBucketLocation` sobre el bucket. |
 | `aws_ssm_parameter.ansible_ssm_bucket` | 🔐 SSM | **Systems Manager → Parameter Store → Create parameter** → Name: `/dkron/prod/ansible_ssm_bucket` → Type: String → Value: `dkron-ansible-ssm-<accountid>` (el inventory Ansible lo lee en runtime). |
@@ -2748,21 +2566,9 @@ variable "ssh_allowed_cidrs" {
 }
 
 variable "ecr_repository_arn" { type = string }
-variable "dsn_parameter_arn" {
-  type        = string
-  description = "ARN del SSM SecureString /dkron/prod/dsn — la EC2 solo lee este."
-}
 variable "image_repo_param_arn" {
   type        = string
   description = "ARN del SSM String /dkron/prod/image_repo — Ansible lo lee para saber qué tag de ECR usar."
-}
-variable "db_security_group_id" {
-  type        = string
-  description = "SG del RDS. Compute añade aquí la regla ingress 5432 (rompe ciclo storage↔compute)."
-}
-variable "s3_outputs_bucket_arn" {
-  type    = string
-  default = ""
 }
 ```
 
@@ -2838,19 +2644,6 @@ resource "aws_security_group" "app" {
   tags = { Name = "${var.project}-app-sg" }
 }
 
-# ───── Regla cross-módulo: abre 5432 en el SG del RDS desde el SG de la app ─────
-# Esta regla vive en compute (no en storage) para romper el ciclo storage↔compute.
-# Ver 5.6 — "rompemos el ciclo via aws_security_group_rule".
-resource "aws_security_group_rule" "db_from_app" {
-  type                     = "ingress"
-  description              = "Postgres desde app"
-  from_port                = 5432
-  to_port                  = 5432
-  protocol                 = "tcp"
-  security_group_id        = var.db_security_group_id
-  source_security_group_id = aws_security_group.app.id
-}
-
 # ───── Key Pair + AMI ─────
 resource "aws_key_pair" "this" {
   key_name   = "${var.project}-key"
@@ -2901,32 +2694,17 @@ resource "aws_iam_role_policy" "ec2_ecr" {
   })
 }
 
-# Lectura del DSN (Ansible la pasa al .env del compose)
-resource "aws_iam_role_policy" "ec2_ssm_dsn" {
+# Lectura del parámetro SSM con la URL del repo ECR (Ansible lo resuelve en runtime).
+# Ya no se lee ningún DSN — Dkron OSS persiste en BoltDB local, no hay credenciales
+# de BD que inyectar al compose.
+resource "aws_iam_role_policy" "ec2_ssm_read" {
   role = aws_iam_role.ec2.id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect = "Allow"
-      Action = ["ssm:GetParameter", "ssm:GetParameters", "kms:Decrypt"]
-      Resource = [
-        var.dsn_parameter_arn,       # /dkron/prod/dsn      (SecureString)
-        var.image_repo_param_arn,    # /dkron/prod/image_repo (String, plain)
-      ]
-    }]
-  })
-}
-
-# Escritura a S3 outputs (solo si está habilitado)
-resource "aws_iam_role_policy" "ec2_s3_outputs" {
-  count = var.s3_outputs_bucket_arn == "" ? 0 : 1
-  role  = aws_iam_role.ec2.id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Action = ["s3:PutObject", "s3:GetObject"]
-      Resource = "${var.s3_outputs_bucket_arn}/*"
+      Effect   = "Allow"
+      Action   = ["ssm:GetParameter", "ssm:GetParameters"]
+      Resource = [var.image_repo_param_arn]
     }]
   })
 }
@@ -2970,7 +2748,7 @@ resource "aws_iam_role_policy" "ec2_ansible_ssm" {
 }
 
 # Publica el nombre del bucket en SSM para que el inventario aws_ec2.yml lo resuelva
-# en runtime (mismo patrón que /dkron/prod/dsn y /dkron/prod/image_repo).
+# en runtime (mismo patrón que /dkron/prod/image_repo).
 resource "aws_ssm_parameter" "ansible_ssm_bucket" {
   name  = "/${var.project}/${var.environment}/ansible_ssm_bucket"
   type  = "String"
@@ -3134,11 +2912,7 @@ module "compute" {
   ssh_public_key       = var.ssh_public_key
   ssh_allowed_cidrs    = var.ssh_allowed_cidrs
   ecr_repository_arn   = module.ecr.repository_arn
-  dsn_parameter_arn    = module.storage.dsn_parameter_arn
   image_repo_param_arn = module.ecr.image_repo_param_arn
-  db_security_group_id = module.storage.db_security_group_id
-
-  s3_outputs_bucket_arn = var.enable_s3_outputs ? module.storage.s3_outputs_bucket_arn : ""
 }
 ```
 
@@ -3178,13 +2952,12 @@ curl -sI http://$(terraform output -raw alb_dns_name)/v1/jobs
 # Esperado: HTTP/1.1 502 Bad Gateway
 ```
 
-> ✅ **Llegaste hasta aquí con 4 applies incrementales independientes:**
+> ✅ **Llegaste hasta aquí con 3 applies incrementales independientes:**
 > 1. `apply -target=module.network` (~2 min)
 > 2. `apply -target=module.ecr` (~30s) + docker push de la imagen
-> 3. `apply -target=module.storage` (~5-7 min)
-> 4. `apply -target=module.compute` (~2-3 min)
+> 3. `apply -target=module.compute` (~2-3 min)
 >
-> Si cualquiera falla, solo recreas ese módulo — no rehaces todo el stack. Ese es el valor del patrón modular.
+> Si cualquiera falla, solo recreas ese módulo — no rehaces todo el stack. Ese es el valor del patrón modular. (Antes había un cuarto paso `apply -target=module.storage` para RDS — eliminado tras el descubrimiento de PARTE 5.4.)
 
 ---
 
@@ -3207,17 +2980,6 @@ module "ecr" {
   project = var.project
 }
 
-module "storage" {
-  source             = "../../modules/storage"
-  project            = var.project
-  environment        = var.environment
-  owner              = var.owner
-  vpc_id             = module.network.vpc_id
-  private_subnet_ids = module.network.private_subnet_ids
-  db_password        = var.db_password
-  enable_s3_outputs  = var.enable_s3_outputs
-}
-
 module "compute" {
   source               = "../../modules/compute"
   project              = var.project
@@ -3230,15 +2992,11 @@ module "compute" {
   ssh_public_key       = var.ssh_public_key
   ssh_allowed_cidrs    = var.ssh_allowed_cidrs
   ecr_repository_arn   = module.ecr.repository_arn
-  dsn_parameter_arn    = module.storage.dsn_parameter_arn
   image_repo_param_arn = module.ecr.image_repo_param_arn
-  db_security_group_id = module.storage.db_security_group_id
-
-  s3_outputs_bucket_arn = var.enable_s3_outputs ? module.storage.s3_outputs_bucket_arn : ""
 }
 ```
 
-> ✅ **Flujo incremental sin ciclos:** `network → ecr → storage → compute`. Storage NO depende de compute (creamos el SG-db vacío); compute añade la regla 5432 sobre el SG-db con `aws_security_group_rule`. Cada módulo se puede `terraform apply -target=module.X` en orden.
+> ✅ **Flujo incremental sin ciclos:** `network → ecr → compute`. **Ya no hay módulo `storage`** (ver PARTE 5.4: BoltDB local sobre EBS, eliminamos RDS). Cada módulo se puede `terraform apply -target=module.X` en orden.
 
 Y el `outputs.tf` del entorno queda:
 
@@ -3252,11 +3010,6 @@ output "public_subnet_ids"  { value = module.network.public_subnet_ids }
 
 # ECR
 output "ecr_repository_url" { value = module.ecr.repository_url }
-
-# Storage
-output "rds_endpoint"           { value = module.storage.rds_endpoint }
-output "dsn_parameter_name"     { value = module.storage.dsn_parameter_name }
-output "s3_outputs_bucket_name" { value = module.storage.s3_outputs_bucket_name }
 
 # Compute (Ansible los consume vía inventario dinámico)
 output "ec2_instance_id" { value = module.compute.ec2_instance_id }
@@ -3276,7 +3029,7 @@ terraform plan -out tfplan
 terraform apply tfplan
 ```
 
-Tarda ~10–15 min (RDS es lo que más, ~5–7 min; EC2 ~1 min; ALB ~1 min).
+Tarda ~3–5 min (EC2 ~1 min, ALB ~1 min, el resto son SGs/IAM/log groups). **Antes eran 10–15 min porque RDS tardaba 5–7; al eliminar storage el apply es mucho más rápido.**
 
 Salida esperada al final:
 ```
@@ -3284,9 +3037,6 @@ alb_dns_name           = "dkron-alb-1234567890.us-east-1.elb.amazonaws.com"
 ec2_instance_id        = "i-0123456789abcdef0"
 ec2_private_ip         = "10.20.10.42"
 ecr_repository_url     = "123456789.dkr.ecr.us-east-1.amazonaws.com/dkron-dkron"
-rds_endpoint           = "dkron-prod.cxyz123.us-east-1.rds.amazonaws.com"
-dsn_parameter_name     = "/dkron/prod/dsn"
-s3_outputs_bucket_name = null         # o el nombre si enable_s3_outputs = true
 ```
 
 ### 🔎 ¿La EC2 está VACÍA y el ALB devuelve 502? Eso es ESPERADO
@@ -3319,14 +3069,6 @@ Si dice `Online`, Ansible podrá conectarse vía SSM (PARTE 6). Si está vacío,
 
 ## 💥 Errores que vas a cometer en la PARTE 5 (yo me equivoqué así)
 
-### Error 5.C: "InvalidParameterCombination: Cannot find version 15.4 for postgres"
-**Causa:** AWS deprecó esa minor version.
-**Solución:** lista versiones disponibles:
-```bash
-aws rds describe-db-engine-versions --engine postgres --query "DBEngineVersions[?starts_with(EngineVersion, '15')].EngineVersion" --output table
-```
-Usa una que sí exista, como `15.7`.
-
 ### Error 5.D: ALB target unhealthy después del apply (esperado)
 **Síntoma:** `curl http://$ALB` devuelve 502 Bad Gateway.
 **Causa:** la EC2 está creada pero **vacía** — todavía no corriste Ansible. Es el estado correcto al final de la PARTE 5.
@@ -3356,15 +3098,6 @@ aws ec2 describe-route-tables --filters "Name=association.subnet-id,Values=<priv
 ```
 **Solución:** revisa tu módulo `network/` — la subnet privada necesita `route 0.0.0.0/0 → nat-gateway`.
 
-### Error 5.F: RDS arranca pero la EC2 no se conecta — "Connection refused"
-**Causa:** SG de RDS no acepta tráfico desde el SG-app de la EC2.
-**Solución:** verifica:
-```bash
-aws ec2 describe-security-groups --group-names dkron-db-sg \
-  --query "SecurityGroups[].IpPermissions[?ToPort==\`5432\`]"
-```
-La regla de ingress debe tener `UserIdGroupPairs[].GroupId` igual al ID del SG-app.
-
 ### Error 5.G: terraform destroy bloqueado por VPC
 **Síntoma:** `DependencyViolation: The vpc has dependencies`.
 **Causa:** ENIs de la EC2 o de tasks ECS Fargate aún liberándose.
@@ -3388,7 +3121,7 @@ aws ec2 describe-instances --instance-ids $(terraform output -raw ec2_instance_i
 ```
 
 ## 🎯 Lo que aprendiste:
-- **Concepto B.1 del reporte:** IaC vs gestión de configuración. Aquí terminaste la **mitad de IaC**: Terraform tiene VPC, EC2, ALB, RDS, ECR, IAM, SSM. La otra mitad la harás en la PARTE 6 con Ansible. Documenta la frontera: "Terraform creó la EC2 vacía; Ansible la configurará".
+- **Concepto B.1 del reporte:** IaC vs gestión de configuración. Aquí terminaste la **mitad de IaC**: Terraform tiene VPC, EC2 (con su EBS root para BoltDB), ALB, ECR, IAM, SSM. La otra mitad la harás en la PARTE 6 con Ansible. Documenta la frontera: "Terraform creó la EC2 vacía; Ansible la configurará".
 - **Concepto B.5 del reporte:** mínimo privilegio. El instance profile de la EC2 tiene **solo** `AmazonSSMManagedInstanceCore` (para gestión remota), `CloudWatchAgentServerPolicy` (para enviar logs) y dos policies inline acotadas a leer dos parámetros SSM específicos por ARN. Eso es defendible. Si tuviste que ampliar (por ejemplo, abrir más permisos de ECR o de KMS), anótalo.
 - **Concepto B.6 del reporte:** state remoto + locking. Hasta aquí ya viste por qué hace falta lock — si dos `terraform apply` corrieran a la vez sobre estos recursos, podrías quedarte con dos EC2 huérfanas o con security groups conflictivos.
 
@@ -3406,7 +3139,7 @@ aws ec2 describe-instances --instance-ids $(terraform output -raw ec2_instance_i
    │                     Tu laptop o GitHub Actions runner              │
    │                                                                    │
    │   1) terraform apply                                               │
-   │      └─▶ crea EC2, VPC, RDS, ECR, SSM, IAM                         │
+   │      └─▶ crea EC2 (con su EBS), VPC, ECR, SSM, IAM, ALB            │
    │                                                                    │
    │   2) ansible-inventory --graph -i ansible/inventories/prod/        │
    │      └─▶ plugin aws_ec2 consulta AWS por tag Project=dkron         │
@@ -3508,7 +3241,7 @@ compose:
   ansible_python_interpreter: /usr/bin/python3
 ```
 
-> 🪣 **Bucket `ansible-ssm`**: el plugin `aws_ssm` usa un bucket S3 para transferir archivos a la EC2 (porque SSM Session Manager por sí solo no es un canal de archivos completo). Lo crea el módulo `compute/` (sección 5.5) — ya está incluido en los snippets de `compute/main.tf` que copiaste antes de llegar aquí; Terraform escribe su nombre al SSM parameter `/dkron/prod/ansible_ssm_bucket` y el inventory lo resuelve en runtime (mismo patrón que `db_dsn` y `ecr_repo`).
+> 🪣 **Bucket `ansible-ssm`**: el plugin `aws_ssm` usa un bucket S3 para transferir archivos a la EC2 (porque SSM Session Manager por sí solo no es un canal de archivos completo). Lo crea el módulo `compute/` (sección 5.5) — ya está incluido en los snippets de `compute/main.tf` que copiaste antes de llegar aquí; Terraform escribe su nombre al SSM parameter `/dkron/prod/ansible_ssm_bucket` y el inventory lo resuelve en runtime (mismo patrón que `ecr_repo`).
 
 **Variables del grupo `all`** — `ansible/inventories/prod/group_vars/all.yml`:
 ```yaml
@@ -3518,11 +3251,11 @@ environment: prod
 region: us-east-1
 
 # Versiones pinneadas (espejo de las que pinnearás en docker-compose)
-dkron_image_tag: "v3.2.7"
+dkron_image_tag: "v4.0.9"
 node_exporter_image_tag: "v1.8.2"
 
 # Lookups a SSM (Ansible los resuelve EN TIEMPO DE EJECUCIÓN, no se versionan)
-db_dsn:  "{{ lookup('amazon.aws.aws_ssm', '/dkron/prod/dsn', region=region, decrypt=True) }}"
+# Ya NO hay lookup de db_dsn — Dkron OSS usa BoltDB local, no requiere DSN.
 ecr_repo: "{{ lookup('amazon.aws.aws_ssm', '/dkron/prod/image_repo', region=region) }}"
 
 # Endpoint del CloudWatch agent
@@ -3560,6 +3293,7 @@ docker_compose_plugin_version: "v2.29.7"
     name:
       - docker
       - python3-pip
+      - python3-urllib3        # awscli depende de este — ver PARTE 11.1
     state: present
 
 - name: Habilitar y arrancar Docker
@@ -3590,6 +3324,18 @@ docker_compose_plugin_version: "v2.29.7"
       - "docker>=7.1"
       - "PyYAML"
     state: present
+  # OJO: NO uses --ignore-installed aquí. Si lo agregas, pip sobreescribe
+  # archivos del urllib3 del sistema y rompe el awscli (ver PARTE 11.1).
+
+- name: Verificar integridad de python3-urllib3 (pip puede haber sobrescrito sus archivos y roto awscli)
+  ansible.builtin.command: rpm -V python3-urllib3
+  register: urllib3_verify
+  failed_when: false
+  changed_when: false
+
+- name: Reinstalar python3-urllib3 si está corrupto
+  ansible.builtin.command: dnf reinstall -y python3-urllib3
+  when: urllib3_verify.stdout | length > 0
 
 - name: Obtener token efímero de ECR (válido 12h)
   ansible.builtin.command:
@@ -3650,11 +3396,11 @@ dkron_node_name: dkron-server
     mode: "0644"
   notify: Reiniciar compose
 
-- name: Renderizar .env (con DSN y configuración runtime)
+- name: Renderizar .env (configuración runtime — ya no contiene DSN)
   ansible.builtin.template:
     src: env.j2
     dest: "{{ dkron_dir }}/.env"
-    mode: "0600"   # solo root lee — contiene el DSN
+    mode: "0600"   # mantenemos 0600 por convención aunque ya no hay secretos
     owner: root
   no_log: true
   notify: Reiniciar compose
@@ -3696,14 +3442,13 @@ dkron_node_name: dkron-server
 - name: Reiniciar compose
   community.docker.docker_compose_v2:
     project_src: "{{ dkron_dir }}"
-    state: present
-    restarted: true
+    state: restarted    # OJO: en docker_compose_v2 el parámetro `restarted: true`
+                        # NO existe — se usa state: restarted directo.
+                        # Ver PARTE 11.3 por qué.
 ```
 
 `ansible/roles/dkron-compose/templates/docker-compose.yml.j2`:
 ```yaml
-version: "3.9"
-
 x-logging: &awslogs
   driver: awslogs
   options:
@@ -3722,10 +3467,12 @@ services:
       - --server
       - --bootstrap-expect=1
       - --node-name={{ dkron_node_name }}
-      - --store=postgres
+      - --data-dir=/dkron.data
       - --log-level={{ dkron_log_level }}
     ports:
       - "8080:8080"
+    volumes:
+      - {{ dkron_data_volume }}:/dkron.data    # BoltDB persistente (host EBS)
     logging: *awslogs
 
   node-exporter:
@@ -3745,17 +3492,11 @@ services:
 `ansible/roles/dkron-compose/templates/env.j2`:
 ```bash
 # Generado por Ansible — NO editar a mano (se sobrescribe en cada deploy)
-# ─── Variables SENSIBLES (vienen de SSM Parameter Store via lookup) ───
-DKRON_DSN={{ db_dsn }}            # ← lookup amazon.aws.aws_ssm con decrypt=True
-
-# ─── Variables NO sensibles (constantes versionadas) ───
-DKRON_BACKEND=postgres
+# Dkron OSS v4 usa BoltDB embebido — no requiere DSN ni backend externo.
 DKRON_LOG_LEVEL={{ dkron_log_level }}
 ```
 
-> 📝 **Cumplimiento PDF sección 3, paso 4 — separación de variables:** *"Variables no sensibles (puertos, flags, niveles de log) como `environment` en la task definition. Variables sensibles (URLs de conexión con credenciales, API keys) en SSM Parameter Store o Secrets Manager, inyectadas vía `secrets`."* En nuestro setup EC2+Compose el patrón es equivalente:
-> - **Equivalente a `environment` de Fargate:** las claves del `env.j2` que son constantes (`DKRON_BACKEND`, `DKRON_LOG_LEVEL`) — se renderizan literalmente desde defaults de Ansible o variables del playbook.
-> - **Equivalente a `secrets` de Fargate:** las claves cuyo valor viene de un `lookup('amazon.aws.aws_ssm', ...)` — el secreto **nunca se escribe en el repo** ni en el state de Terraform; Ansible lo resuelve en runtime al ejecutar el playbook y lo materializa en `/opt/dkron/.env` con permisos `0600` (solo root). Si rotas la credencial en SSM, basta con re-ejecutar `deploy.yml` para que el nuevo valor quede en la EC2.
+> 📝 **Sobre la separación de variables sensibles vs no sensibles:** el PDF sección 3 paso 4 pide separar variables no sensibles (puertos, flags, niveles de log) de variables sensibles (URLs de conexión con credenciales, API keys) usando SSM Parameter Store. En este proyecto, **al cambiar a BoltDB embebido desaparecieron las variables sensibles del runtime de Dkron** (ya no hay DSN). El `.env` queda solo con `DKRON_LOG_LEVEL`. Las únicas credenciales sensibles que siguen viviendo en SSM son las **de Grafana** (la admin password, que se inyecta en la task Fargate vía `secrets:` — ver PARTE 8). Si más adelante necesitas variables sensibles para Dkron (por ejemplo, un token para webhooks de notificación), el patrón sigue siendo el mismo: declararlas en `env.j2` con un lookup `{{ lookup('amazon.aws.aws_ssm', '...', decrypt=True) }}`.
 
 ## ❓ 6.6 Los playbooks: `site.yml` y `deploy.yml`
 
@@ -3876,10 +3617,11 @@ aws ssm start-session --target $(cd ../infra/envs/prod && terraform output -raw 
 **Solución:** revisa que la tarea "Instalar SDK de Docker para Python" esté antes de cualquier tarea del compose.
 
 ### Error 6.D: `wait_for: port 8080` timeout
-**Causa A:** RDS aún no acepta conexiones, Dkron está reintentando y no termina de subir.
-**Causa B:** olvidaste el `env_file: .env` en el compose, Dkron arranca sin DSN y sale.
+**Causa A:** el container de Dkron está en `Restarting (1)` — el binario salió con error. Causa más común en este proyecto: usaste `--store=postgres` en el `command` y Dkron OSS no lo soporta (imprime el help y muere). **Ver PARTE 11.2 con el debug completo.**
+**Causa B:** la imagen de ECR no se descargó (token vencido, rol IAM mal). `docker logs dkron` te lo dice.
 **Diagnóstico:**
 ```bash
+ansible all -a "docker compose -f /opt/dkron/docker-compose.yml ps"
 ansible all -a "docker logs dkron --tail 50"
 ```
 
@@ -3900,7 +3642,7 @@ ansible-playbook playbooks/deploy.yml --tags deploy
 **Solución:** en el job de CI, instala `pip install ansible-core boto3 botocore` antes de ejecutar.
 
 ## 🎯 Lo que aprendiste:
-- **Concepto B.1 del reporte (cierre):** ahora SÍ tienes ejemplo concreto. Terraform creó la EC2 + RDS + IAM + ALB. Ansible instaló Docker, copió `docker-compose.yml`, levantó los containers, hizo el smoke test. Ninguna de las dos herramientas habría podido sola.
+- **Concepto B.1 del reporte (cierre):** ahora SÍ tienes ejemplo concreto. Terraform creó la EC2 + IAM + ALB + ECR. Ansible instaló Docker, copió `docker-compose.yml`, levantó los containers (con BoltDB persistente en `/var/lib/dkron-data` del host), hizo el smoke test. Ninguna de las dos herramientas habría podido sola.
 - **Idempotencia (concepto subyacente):** corre `ansible-playbook site.yml` dos veces seguidas. La segunda debe terminar con todas las tareas en `ok=N changed=0`. Esa es la firma de un playbook bien escrito y la diferencia clave con un script bash.
 - **Mínimo privilegio (B.5):** la EC2 NO expone SSH a Internet. Ansible se conecta vía SSM Session Manager con autenticación IAM. Documenta este desvío del patrón "ansible+ssh" clásico del bootcamp.
 
@@ -4213,7 +3955,6 @@ En tu repo: **Settings → Secrets and variables → Actions → New repository 
 | `AWS_ROLE_ARN` | `arn:aws:iam::...:role/github-actions-dkron` | output de `bootstrap-oidc.sh` |
 | `ECR_REPO` | `123...dkr.ecr.us-east-1.amazonaws.com/dkron-dkron` | output de `terraform output -raw ecr_repository_url` |
 | `TF_OWNER` | `tunombre` | el mismo que pusiste en `terraform.tfvars` |
-| `DB_PASSWORD` | una password fuerte | igual a la de `terraform.tfvars` |
 | `SSH_PUBLIC_KEY` | contenido de tu `~/.ssh/id_ed25519.pub` | `cat ~/.ssh/id_ed25519.pub` |
 | `ALERT_EMAIL` | `tu-correo@gmail.com` | tu email para SNS |
 | `GRAFANA_ADMIN_PASSWORD` | password admin de Grafana | igual a la de `terraform.tfvars` |
@@ -4350,7 +4091,6 @@ jobs:
         working-directory: infra/envs/prod
         env:
           TF_VAR_owner:                  ${{ secrets.TF_OWNER }}
-          TF_VAR_db_password:            ${{ secrets.DB_PASSWORD }}
           TF_VAR_ssh_public_key:         ${{ secrets.SSH_PUBLIC_KEY }}
           TF_VAR_github_repo:            ${{ github.repository }}
           TF_VAR_alert_email:            ${{ secrets.ALERT_EMAIL }}
@@ -4379,7 +4119,6 @@ jobs:
         working-directory: infra/envs/prod
         env:
           TF_VAR_owner:                  ${{ secrets.TF_OWNER }}
-          TF_VAR_db_password:            ${{ secrets.DB_PASSWORD }}
           TF_VAR_ssh_public_key:         ${{ secrets.SSH_PUBLIC_KEY }}
           TF_VAR_github_repo:            ${{ github.repository }}
           TF_VAR_alert_email:            ${{ secrets.ALERT_EMAIL }}
@@ -4424,7 +4163,7 @@ jobs:
         working-directory: ansible
         run: |
           ansible-playbook playbooks/deploy.yml \
-            --extra-vars "dkron_image_tag=v3.2.7"
+            --extra-vars "dkron_image_tag=v4.0.9"
       - name: Smoke test desde el ALB
         run: |
           ALB="${{ needs.apply.outputs.alb_dns_name }}"
@@ -4437,7 +4176,7 @@ jobs:
           exit 1
 ```
 
-> Secrets necesarios en GitHub (los **7**): `AWS_ROLE_ARN`, `ECR_REPO`, `TF_OWNER`, `DB_PASSWORD`, `SSH_PUBLIC_KEY`, `ALERT_EMAIL`, `GRAFANA_ADMIN_PASSWORD`. Si te falta cualquiera, `terraform plan` revienta con `No value for required variable`.
+> Secrets necesarios en GitHub (los **6**): `AWS_ROLE_ARN`, `ECR_REPO`, `TF_OWNER`, `SSH_PUBLIC_KEY`, `ALERT_EMAIL`, `GRAFANA_ADMIN_PASSWORD`. Si te falta cualquiera, `terraform plan` revienta con `No value for required variable`. **Ya no hay `DB_PASSWORD`** — al eliminar el módulo storage (BoltDB local, ver PARTE 5.4) desapareció esa variable.
 
 ## ❓ 7.4 El workflow de destrucción: `.github/workflows/destruir.yaml`
 
@@ -4473,7 +4212,6 @@ jobs:
         working-directory: infra/envs/prod
         env:
           TF_VAR_owner:                  ${{ secrets.TF_OWNER }}
-          TF_VAR_db_password:            ${{ secrets.DB_PASSWORD }}
           TF_VAR_ssh_public_key:         ${{ secrets.SSH_PUBLIC_KEY }}
           TF_VAR_github_repo:            ${{ github.repository }}
           TF_VAR_alert_email:            ${{ secrets.ALERT_EMAIL }}
@@ -4533,7 +4271,7 @@ concurrency:
 
 ### Error 7.E: Checkov falla con cientos de hallazgos
 **Síntoma:** muchos warnings sobre cifrado, multi-AZ, etc.
-**Solución:** **algunos son legítimos** (RDS no encrypted? agrégale `storage_encrypted = true`). **Otros son por el alcance** (single-AZ — el PDF lo permite). Documenta los skips:
+**Solución:** **algunos son legítimos** (EBS no encrypted? agrégale `encrypted = true`). **Otros son por el alcance** (single-AZ — el PDF lo permite). Documenta los skips:
 ```hcl
 # checkov:skip=CKV_AWS_157: multi-AZ no aplica al alcance del proyecto (sección 4 del PDF)
 ```
@@ -4590,7 +4328,7 @@ Como **regla mental**: si el step VALIDA seguridad o calidad (Trivy, Checkov, an
 
 ## 🎯 Lo que aprendiste:
 - **Concepto B.3 del reporte:** Implementaste **Continuous Delivery**, no Deployment, porque el `apply` requiere aprobación manual en el environment "production". Eso es deliberado.
-- **Concepto B.2 del reporte (cierre):** ahora tienes el comparativo completo. CI/CD con containers + Ansible deploy es: (1) build de la imagen una vez en ECR, (2) `terraform apply` declarativo, (3) `ansible-playbook` que solo hace `docker pull` + restart. La parte que toma minutos es ECR push y RDS apply; el deploy real (Ansible sobre la EC2 ya provisionada) tarda **30-60 segundos**. Si todo viviera en EC2 sin containers, ese deploy implicaría compilar Dkron en la VM, gestionar dependencias del SO, manejar `systemd`, hacer rollback manual: minutos por deploy y mucha superficie operativa.
+- **Concepto B.2 del reporte (cierre):** ahora tienes el comparativo completo. CI/CD con containers + Ansible deploy es: (1) build de la imagen una vez en ECR, (2) `terraform apply` declarativo, (3) `ansible-playbook` que solo hace `docker pull` + restart. La parte que toma minutos es el ECR push y la primera creación de Fargate; el deploy real (Ansible sobre la EC2 ya provisionada) tarda **30-60 segundos**. Si todo viviera en EC2 sin containers, ese deploy implicaría compilar Dkron en la VM, gestionar dependencias del SO, manejar `systemd`, hacer rollback manual: minutos por deploy y mucha superficie operativa.
 
 ---
 
@@ -5594,7 +5332,7 @@ output "log_group_obs"             { value = aws_cloudwatch_log_group.obs.name }
 
 ### 🔌 Instancia el módulo en `infra/envs/prod/main.tf` (copy-paste)
 
-> 📌 **Antes**: añade al `variables.tf` del entorno una nueva var `grafana_admin_password` (sensitive) y al `terraform.tfvars` un valor real. Mismo patrón que `db_password`.
+> 📌 **Antes**: añade al `variables.tf` del entorno una nueva var `grafana_admin_password` (sensitive) y al `terraform.tfvars` un valor real. Es la **única** variable sensible que queda en el proyecto (antes había también `db_password`; se eliminó al pasar Dkron a BoltDB local — ver PARTE 5.4).
 
 ```hcl
 # infra/envs/prod/variables.tf  (añadir)
@@ -5669,11 +5407,12 @@ echo "Revisa tu bandeja: $(terraform output -raw alert_email 2>/dev/null || echo
 > ✅ **Resumen del flujo incremental completo (Partes 5 + 8):**
 > 1. `apply -target=module.network`     (~2 min)
 > 2. `apply -target=module.ecr`         (~30 s) + `docker push`
-> 3. `apply -target=module.storage`     (~5-7 min)
-> 4. `apply -target=module.compute`     (~2-3 min)
-> 5. (PARTE 6) `ansible-playbook site.yml` para poblar la EC2
-> 6. `apply -target=module.monitoring`  (~5-8 min)
-> 7. (8.4) Confirma email SNS, dispara alerta intencional, captura evidencias
+> 3. `apply -target=module.compute`     (~2-3 min)
+> 4. (PARTE 6) `ansible-playbook site.yml` para poblar la EC2
+> 5. `apply -target=module.monitoring`  (~5-8 min)
+> 6. (8.4) Confirma email SNS, dispara alerta intencional, captura evidencias
+>
+> (Antes había un paso `apply -target=module.storage` para RDS — eliminado en PARTE 5.4.)
 
 ## ❓ 8.3 ¿Cómo defino mis 2 SLOs en PromQL?
 
@@ -5825,13 +5564,14 @@ Resultado: los **cuatro flujos de log** (Dkron, node_exporter, Prometheus, Grafa
 > 💡 **Bonus para el reporte:** Grafana también puede mostrar logs vía el datasource **CloudWatch Logs** — añádelo en *Connections → Data sources → AWS CloudWatch* (necesita un IAM role attach al task de Grafana). Así tienes métricas y logs lado a lado en un solo panel.
 
 ## ❓ 8.8 ¿Y las migraciones de schema de Dkron al actualizar versión?
-La sección 3 paso 2 del PDF lo menciona: "esquema de migraciones de base de datos cuando aplica". Para Dkron:
-- En el primer arranque, Dkron crea las tablas que necesita en PostgreSQL automáticamente.
-- Al **actualizar Dkron** (de `v3.2.7` a `v3.3.0`, por ejemplo), si la nueva versión cambia el schema, Dkron también aplica las migraciones automáticamente al arrancar.
+La sección 3 paso 2 del PDF lo menciona: "esquema de migraciones de base de datos cuando aplica". Para Dkron con **BoltDB embebido**:
+- En el primer arranque, Dkron inicializa el archivo BoltDB en `/dkron.data` con su estructura interna (no hay tablas SQL — BoltDB es key-value).
+- Al **actualizar Dkron** (de `v4.0.9` a una versión futura), si la nueva versión cambia el formato del store, Dkron aplica la migración automáticamente al arrancar leyendo el archivo BoltDB existente.
 - **Riesgo:** si la migración tarda y el ALB tiene `healthy_threshold` corto, el target queda unhealthy.
 - **Mitigación específica para EC2 + Compose:** el playbook `deploy.yml` hace `docker_compose_v2 ... pull: missing` y luego `wait_for: port=8080 timeout=90` antes del smoke test. Si la migración requiere más de 90s, ajusta el `timeout` del playbook **antes** de un upgrade mayor. Documenta esto en el runbook.
+- **Recomendación adicional para upgrades mayores:** toma un snapshot del volumen EBS (ver runbook R1) **antes** del upgrade. Si la migración falla, puedes restaurar el snapshot y volver a la versión anterior con `dkron_image_tag` previo.
 
-**Qué documentar en el reporte:** "Las migraciones de schema las gestiona Dkron en runtime al arrancar. No hay un proceso separado de migrate; el riesgo se mitiga con un wait_for en el playbook de Ansible y health-check tolerante en el ALB durante upgrades."
+**Qué documentar en el reporte:** "Las migraciones del store BoltDB las gestiona Dkron en runtime al arrancar. No hay un proceso separado de migrate; el riesgo se mitiga con un wait_for en el playbook de Ansible, health-check tolerante en el ALB durante upgrades y snapshot manual del EBS antes de un upgrade mayor."
 
 ---
 
@@ -5866,16 +5606,16 @@ La sección 3 paso 2 del PDF lo menciona: "esquema de migraciones de base de dat
               ┌──────────────────┴──────────────────┐
               │                                     │
               ▼                                     ▼
-        ¿el storage                            ¿la EC2 puede
-         es persistente?                        recrearse limpia?
+       ¿Dkron OSS soporta                     ¿estás usando
+        el flag --store=postgres?              Dkron Pro?
               │                                     │
-        EBS gp3 → SÍ                          terraform taint → SÍ
+       NO (solo Pro lo soporta)              SÍ → Postgres válido
               │                                     │
               └─────────────┬───────────────────────┘
                             ▼
-                   PostgreSQL en RDS
-                   (BoltDB se pierde si recreo EC2;
-                    además snapshots de RDS son barra libre)
+                   BoltDB embebido sobre EBS gp3 encriptado
+                   (mitigación durabilidad: snapshots EBS via DLM)
+                   Postgres NO es opción real en Dkron OSS v4.
 
                     ┌──────────────────────────┐
                     │  Decisión 3:             │
@@ -5950,7 +5690,7 @@ La sección 3 paso 2 del PDF lo menciona: "esquema de migraciones de base de dat
 
 **Marco:**
 - **Mismo proceso (un solo container `dkron --server`):** el binario de Dkron actúa simultáneamente como scheduler y como ejecutor. Es lo más simple operativamente y lo que la documentación oficial muestra primero.
-- **Separados (container `dkron-server` + container `dkron-agent`):** el server solo agenda y mantiene estado en RDS; los agents reciben dispatch por Serf y corren los runs. Permite escalar el ejecutor horizontalmente sin tocar el scheduler y aislar fallos del ejecutor (un agent que cuelga no afecta al scheduler).
+- **Separados (container `dkron-server` + container `dkron-agent`):** el server solo agenda y mantiene estado en BoltDB local; los agents reciben dispatch por Serf y corren los runs. Permite escalar el ejecutor horizontalmente sin tocar el scheduler y aislar fallos del ejecutor (un agent que cuelga no afecta al scheduler).
 
 **Trade-offs del Caso D:**
 
@@ -5962,16 +5702,33 @@ La sección 3 paso 2 del PDF lo menciona: "esquema de migraciones de base de dat
 | Costo (alcance 1 nodo)   | Igual (1 EC2)              | Igual (1 EC2) — ambos containers en la misma EC2 |
 | Fit con el alcance       | Excelente                  | Sobre-engineering para 1 AZ y 1 nodo          |
 
-**Respuesta tipo:** "El binario de Dkron expone los roles `server` y `agent`. Para el alcance (1 EC2, 1 AZ), corro **un solo container** que actúa como ambos (`dkron --server`), tal como la documentación oficial recomienda para single-node. La topología del PDF marca el agent como opcional precisamente para este caso. Si en una iteración futura necesitara aislar el ejecutor (jobs largos que arriesgan al scheduler) o escalar agents detrás del mismo server, partiría el compose en dos services apuntando al mismo RDS y descubriéndose por Serf — pero esa complejidad hoy no se justifica."
+**Respuesta tipo:** "El binario de Dkron expone los roles `server` y `agent`. Para el alcance (1 EC2, 1 AZ), corro **un solo container** que actúa como ambos (`dkron --server`), tal como la documentación oficial recomienda para single-node. La topología del PDF marca el agent como opcional precisamente para este caso. Si en una iteración futura necesitara aislar el ejecutor (jobs largos que arriesgan al scheduler) o escalar agents detrás del mismo server, partiría el compose en dos services apuntando al mismo BoltDB compartido (o, si la complejidad lo justifica, migrando a Dkron Pro con backend Postgres) y descubriéndose por Serf — pero esa complejidad hoy no se justifica."
 
 > **Si decides separarlos**, ajusta el `docker-compose.yml` de la PARTE 3 con dos services (`dkron-server` con flag `--server` y `dkron-agent` apuntando al server por Serf en puerto 8946) y documenta el cambio en el reporte. El resto de la infraestructura no cambia.
 
 ## ❓ 9.2 ¿BoltDB local o PostgreSQL?
-**Marco:**
-- **BoltDB:** archivo local en el container. Si reinicio la EC2 o reciclo el volumen EBS, pierdo el archivo → pierdo los jobs definidos. Aún con EBS persistente, una `terraform taint` de la EC2 borra los jobs.
-- **PostgreSQL (RDS):** persistencia real. Sobrevive a reinicios, recreación de la EC2, escalado.
 
-**Respuesta tipo:** "PostgreSQL en RDS. Aunque la EC2 tenga EBS gp3 persistente, separar el estado en RDS me permite re-crear la EC2 sin perder jobs (escenario crítico para Ansible: si re-corro `site.yml` desde cero, los jobs siguen ahí). Además RDS habilita snapshots automáticos para backup."
+**Marco (con dato duro descubierto en producción):**
+- El PDF deja la elección al proyecto: "BoltDB local **o** PostgreSQL".
+- **Pero Dkron OSS v4 no soporta backend Postgres.** Los flags `--store=postgres`, `--backend=postgres` y `--dsn=...` solo existen en **Dkron Pro** (la versión comercial). Si pasas `--store=postgres` al binario OSS, el container imprime el listado completo de `dkron agent --help` y sale con código 1. Verificación directa: `docker run --rm dkron/dkron:v4.0.9 agent --help | grep -iE 'store|backend|dsn|postgres'` devuelve **vacío**.
+- Esto reduce la decisión real a **BoltDB sí o sí**, con la pregunta secundaria de **cómo mitigar la durabilidad**.
+
+**Opciones de durabilidad con BoltDB:**
+- **BoltDB sobre el filesystem del container (sin volumen):** se pierde con `docker compose down -v`, con un `restart` del container si la imagen cambia el path, y obviamente al destruir la EC2.
+- **BoltDB sobre un bind mount al host (`/var/lib/dkron-data`) sobre el volumen root EBS de la EC2 (gp3, encriptado):** sobrevive `docker compose down/up`, sobrevive reinicios de la EC2. Lo pierdes si destruyes la EC2 sin haber tomado un snapshot del EBS. ← **es lo que hacemos**.
+- **BoltDB sobre EBS dedicado adicional, con DLM (Data Lifecycle Manager) snapshots diarios:** sobrevive incluso a la destrucción de la EC2 (puedes adjuntar el snapshot al volumen de una EC2 nueva). Costo extra: ~$0.05/mes por snapshot + el EBS extra. **Mitigación recomendable para producción real.**
+
+**Trade-offs frente a la opción Postgres (la que NO podemos tomar en OSS):**
+
+| Aspecto | BoltDB en EBS (lo que hacemos) | PostgreSQL en RDS (Dkron Pro) |
+|---|---|---|
+| Soporte en Dkron OSS | ✅ default | ❌ feature de Pro |
+| Costo | $0 (EBS root ya pagado) | ~$15/mes (db.t3.micro) |
+| Sobrevive destruir EC2 | Solo con snapshot del EBS | Sí (RDS es independiente) |
+| Backups automáticos | Manual o DLM opcional | Snapshots automáticos RDS |
+| Complejidad infra | Mínima | Módulo storage + SG-db + SSM SecureString del DSN |
+
+**Respuesta tipo:** "BoltDB embebido sobre un volumen EBS gp3 encriptado de la propia EC2 (`/var/lib/dkron-data` → `/dkron.data` en el container). La pregunta del PDF plantea BoltDB o PostgreSQL, pero al validar la matriz de features de **Dkron OSS v4** confirmé que el flag `--store=postgres` solo existe en **Dkron Pro**. Mi proyecto usa el binario OSS, así que la elección real era cómo mitigar la durabilidad de BoltDB. La estrategia fue: (1) montar el data-dir sobre el EBS root de la EC2, que es gp3 + encriptado, para que sobreviva reinicios y `docker compose down/up`; (2) dejar el `terraform destroy` con `delete_on_termination = true` porque el alcance es de proyecto y la recreación limpia es deseable; (3) documentar en el runbook (R1) cómo activar DLM con snapshots diarios si pasara a producción real. El precio operativo: un `terraform taint aws_instance.dkron` borra el histórico — riesgo aceptable contra el ahorro de RDS y un módulo Terraform completo. **Antes de tomar esta decisión gasté un sprint diseñando el módulo `storage/` con RDS y SSM SecureString del DSN; descubrí la incompatibilidad debugeando el container en `Restarting (1)` infinito (PARTE 11.2) — esto es lo que documento en el reporte como evidencia del concepto B.7 'trade-offs del componente de estado': validar matriz OSS vs Pro **antes** de aprovisionar.""
 
 ## ❓ 9.3 ¿Cómo se mide el drift? ¿Qué métrica registra ese delta?
 **Marco:** Dkron registra `started_at` y `scheduled_at` por execution. Drift = diferencia entre ambos.
@@ -5988,9 +5745,9 @@ Métricas nativas de Dkron no exponen el drift directo. Soluciones:
 - Mitigaciones:
   1. **`concurrency: forbid`** en la definición del job: Dkron no permite dos ejecuciones simultáneas del mismo job.
   2. **Idempotencia en el script ejecutado**: el script comprueba si ya corrió (lock en DB, archivo en S3 con la fecha).
-  3. **Persistir executions en RDS**: al reiniciar, Dkron ve el histórico.
+  3. **Persistir executions en BoltDB sobre EBS**: al reiniciar el container o la EC2, el archivo BoltDB queda y Dkron ve el histórico al volver.
 
-**Respuesta tipo:** "Combiné dos capas: (1) `concurrency: forbid` en cada job; (2) idempotencia obligatoria en el script ejecutado con un row-lock en una tabla de outputs. La persistencia en RDS asegura que el histórico sobreviva al reinicio del container o de la EC2. Específico de mi setup con Ansible: el `deploy.yml` hace `up -d` con `restart: unless-stopped` y wait_for, así que Dkron pierde como máximo una ventana de 30-60s en deploy."
+**Respuesta tipo:** "Combiné dos capas: (1) `concurrency: forbid` en cada job; (2) idempotencia obligatoria en el script ejecutado con un lock externo (ej. condición `aws s3api put-object --if-none-match` sobre un marker en S3 o un `INSERT ... ON CONFLICT` si el script ataca una BD propia). La persistencia en BoltDB sobre EBS asegura que el histórico sobreviva al reinicio del container o de la EC2. Específico de mi setup con Ansible: el `deploy.yml` hace `up -d` con `restart: unless-stopped` y wait_for, así que Dkron pierde como máximo una ventana de 30-60s en deploy."
 
 ## ❓ 9.5 ¿Qué política de timeout y qué pasa si la excede?
 **Marco:** Dkron tiene `timeout: "10m"` en cada job. Al excederlo:
@@ -6005,7 +5762,7 @@ Métricas nativas de Dkron no exponen el drift directo. Soluciones:
 > 🧭 **Por qué esta pregunta vive aquí:** la imagen del PDF (página 11) muestra **S3 outputs de jobs** dentro del bloque "Almacenamiento (opcional)" — la palabra "opcional" es literal, igual que en la sección "Componentes mínimos a desplegar" del Escenario D (PDF página 10: *"(Opcional) Storage S3 para los outputs"*). Tomar o no tomar S3 es decisión del proyecto y entra en el reporte.
 
 **Marco:**
-- **Sin S3:** stdout/stderr de cada job queda en la tabla `executions` de RDS (Dkron trunca a unos cuantos KB por defecto) y, vía el driver `awslogs` del container, en **CloudWatch Logs**. Suficiente para jobs cortos y outputs pequeños.
+- **Sin S3:** stdout/stderr de cada job queda en el archivo BoltDB local (Dkron trunca a unos cuantos KB por defecto) y, vía el driver `awslogs` del container, en **CloudWatch Logs**. Suficiente para jobs cortos y outputs pequeños.
 - **Con S3:** un job que ejecuta un script puede subir su output completo al bucket `dkron-outputs/<job>/<execution_id>.log`. Útil para jobs largos, reportes, dumps de base de datos.
 
 **Trade-offs:**
@@ -6014,11 +5771,11 @@ Métricas nativas de Dkron no exponen el drift directo. Soluciones:
 |----------------------|--------------------------------|-------------------------------------------|
 | Costo               | $0                              | ~$0.023/GB-mes + requests (centavos)      |
 | Setup               | Nada extra                      | Bucket + IAM policy + lógica en el script |
-| Tamaño de output    | Limitado por RDS y CloudWatch   | Sin límite práctico                       |
+| Tamaño de output    | Limitado por BoltDB y CloudWatch | Sin límite práctico                      |
 | Búsqueda           | Logs Insights sobre CloudWatch  | Aparte: `aws s3 cp` o `aws s3 select`     |
 | Retención          | Configurable en CloudWatch (mín 1 día) | S3 lifecycle (Glacier después de N días) |
 
-**Respuesta tipo (si decides NO usar S3):** "El alcance del proyecto no maneja jobs que generen outputs grandes — los runs son `curl` a un health endpoint y un dump corto de Postgres. CloudWatch Logs con retención de 7 días es suficiente y elimina un componente del diagrama. Si en el futuro hubiera jobs que produjeran archivos (backups, exports), añadiría el bucket `dkron-outputs` con un lifecycle a Glacier en 30 días."
+**Respuesta tipo (si decides NO usar S3):** "El alcance del proyecto no maneja jobs que generen outputs grandes — los runs son `curl` a un health endpoint y un dump corto de logs. CloudWatch Logs con retención de 7 días es suficiente y elimina un componente del diagrama. Si en el futuro hubiera jobs que produjeran archivos (backups, exports), añadiría el bucket `dkron-outputs` con un lifecycle a Glacier en 30 días."
 
 **Respuesta tipo (si decides SÍ usar S3):** "Activé el bucket `dkron-outputs` con versionado, encriptación SSE-S3 y bloqueo de acceso público. El IAM Task Role del agent tiene `s3:PutObject` solo sobre `arn:aws:s3:::dkron-outputs/*`. Cada script ejecutado por Dkron termina con `aws s3 cp $LOG s3://dkron-outputs/$JOB/$EXEC.log`. Lifecycle: transition a Glacier IR a los 30 días, expiración a los 90. Decisión documentada como protección frente a outputs grandes que saturarían CloudWatch Logs."
 
@@ -6032,33 +5789,45 @@ Métricas nativas de Dkron no exponen el drift directo. Soluciones:
 ```markdown
 # Runbook — Dkron Prod
 
-## R1: Restaurar la base de datos desde un snapshot
+## R1: Backup / restore del volumen EBS con BoltDB (persistencia de Dkron)
 
-### Precondiciones
-- Acceso a AWS console o CLI con perfil `dev-tu-nombre`.
-- Saber el `db-instance-identifier`: `dkron-prod`.
+> 🧠 **Contexto:** Dkron OSS persiste en BoltDB local sobre `/var/lib/dkron-data` en la EC2 (volumen root EBS gp3 encriptado). No hay RDS. La recuperación se hace con snapshots de EBS.
 
-### Pasos
+### Snapshot manual (rápido, antes de un cambio riesgoso)
+
+```bash
+EC2_ID=$(cd infra/envs/prod && terraform output -raw ec2_instance_id)
+VOL_ID=$(aws ec2 describe-instances --instance-ids "$EC2_ID" \
+  --query "Reservations[].Instances[].BlockDeviceMappings[?DeviceName=='/dev/xvda'].Ebs.VolumeId" \
+  --output text)
+aws ec2 create-snapshot --volume-id "$VOL_ID" --description "Manual snapshot - dkron-prod $(date -Iseconds)"
+```
+
+### Snapshots automáticos via DLM (recomendado para prod real)
+
+Crea una `aws_dlm_lifecycle_policy` que tome un snapshot diario del volumen tag `Role=dkron-server` con retención 7 días. Costo: ~$0.05/mes/snapshot.
+
+### Restore desde un snapshot
+
 1. Localiza el snapshot:
    ```
-   aws rds describe-db-snapshots --db-instance-identifier dkron-prod
+   aws ec2 describe-snapshots --owner-ids self \
+     --filters "Name=tag:Role,Values=dkron-server" \
+     --query "Snapshots[*].[SnapshotId,StartTime,Description]" --output table
    ```
-2. Restaura a una nueva instancia:
+2. Crea un volumen nuevo desde el snapshot, en la misma AZ que la EC2:
    ```
-   aws rds restore-db-instance-from-db-snapshot \
-     --db-instance-identifier dkron-prod-restored \
-     --db-snapshot-identifier <snapshot-id>
+   aws ec2 create-volume --snapshot-id <snap-id> \
+     --availability-zone us-east-1a --volume-type gp3 --encrypted
    ```
-3. Espera ~10 min hasta `available`.
-4. Actualiza el SSM Parameter `/dkron/prod/dsn` con el nuevo endpoint.
-5. Re-corre Ansible para que re-renderice el `.env` y reinicie el container con la nueva DSN:
-   ```
-   cd ansible
-   ansible-playbook playbooks/deploy.yml --tags deploy
-   ```
+3. **Opción A — restore in-place** (si la EC2 sigue viva):
+   - `docker compose down` (detiene Dkron, libera el bind mount).
+   - Reemplaza el contenido de `/var/lib/dkron-data` con el contenido del volumen restaurado (mountalo temporalmente, `rsync -a /mnt/restore/ /var/lib/dkron-data/`).
+   - `docker compose up -d` → Dkron arranca con el BoltDB restaurado.
+4. **Opción B — restore en EC2 nueva** (si destruiste la EC2): después de `terraform apply` que recrea la EC2, monta el volumen restaurado en `/var/lib/dkron-data` antes de correr `ansible-playbook site.yml`.
 
 ### Verificación
-- `curl http://$ALB/v1/jobs` debe responder con 200.
+- `curl http://$ALB/v1/jobs` debe responder con 200 y devolver la lista de jobs previos.
 
 ---
 
@@ -6081,7 +5850,7 @@ Métricas nativas de Dkron no exponen el drift directo. Soluciones:
 4. Si el rollback no resuelve, escala a R3 (recreación de la EC2).
 
 ### Prevención
-- Los tags inmutables en ECR (`tag_mutability = "IMMUTABLE"`) garantizan que cada `v3.2.7` apunta a una imagen fija. Configúralo en `aws_ecr_repository`.
+- Los tags inmutables en ECR (`tag_mutability = "IMMUTABLE"`) garantizan que cada `v4.0.9` apunta a una imagen fija. Configúralo en `aws_ecr_repository`.
 
 ---
 
@@ -6121,10 +5890,10 @@ Métricas nativas de Dkron no exponen el drift directo. Soluciones:
 - ALB pasa a healthy: 30-60s tras el smoke test.
 - **RTO total: ~7-10 minutos**.
 
-### Notas
-- Los **jobs definidos** sobreviven (viven en RDS).
-- El **historial de executions** sobrevive (RDS).
-- La EC2 nueva no tiene historia local (logs de container previos), pero los logs ya estaban en CloudWatch Logs por el `awslogs` driver.
+### Notas sobre persistencia (importante)
+- ⚠️ **Los jobs definidos y el historial de executions viven en BoltDB sobre el EBS root de la EC2.** Si `terraform taint` destruye la EC2, el EBS se destruye con ella (`delete_on_termination = true`) → **pierdes el histórico**.
+- Mitigación: **antes** de hacer `terraform taint`, toma un snapshot manual del volumen (ver R1) o ten DLM activo. Después de `terraform apply` y antes de `ansible-playbook site.yml`, monta el snapshot restaurado en `/var/lib/dkron-data` (ver R1 opción B).
+- Los logs de container previos viven en CloudWatch Logs por el driver `awslogs`, así que esa historia no se pierde aunque destruyas la EC2.
 ```
 
 ## ❓ 10.2 ¿Qué va en el README.md?
@@ -6132,10 +5901,11 @@ Métricas nativas de Dkron no exponen el drift directo. Soluciones:
 ```markdown
 # Dkron en AWS — Caso D
 
-Despliegue del scheduler distribuido [Dkron](https://dkron.io) (versión `v3.2.7`)
-en AWS sobre **EC2 + Docker Compose** gestionado por **Ansible**, con RDS PostgreSQL,
-ALB público, observabilidad híbrida (Prometheus + Grafana en ECS Fargate) y CI/CD
-con GitHub Actions (Terraform apply + ansible-playbook deploy).
+Despliegue del scheduler distribuido [Dkron](https://dkron.io) (versión `v4.0.9`)
+en AWS sobre **EC2 + Docker Compose** gestionado por **Ansible**, con persistencia
+local en **BoltDB sobre EBS** (Dkron OSS no soporta Postgres — ver REPORTE.md y
+GUIA.md PARTE 5.4), ALB público, observabilidad híbrida (Prometheus + Grafana en
+ECS Fargate) y CI/CD con GitHub Actions (Terraform apply + ansible-playbook deploy).
 
 ## Arquitectura
 ![diagrama](docs/arquitectura.png)
@@ -6189,18 +5959,16 @@ open http://localhost:3000             # Grafana (admin/admin)
    ```
 
 ## Variables requeridas
-- `TF_VAR_db_password` — password de RDS.
 - `TF_VAR_ssh_public_key` — pública SSH (key pair AWS).
 - `TF_VAR_alert_email` — email para recibir las alertas SNS.
 - `TF_VAR_grafana_admin_password` — password admin de Grafana.
-- Secrets en GitHub: `AWS_ROLE_ARN`, `ECR_REPO`, `DB_PASSWORD`, `SSH_PUBLIC_KEY`.
+- Secrets en GitHub: `AWS_ROLE_ARN`, `ECR_REPO`, `SSH_PUBLIC_KEY`, `GRAFANA_ADMIN_PASSWORD`, `ALERT_EMAIL`, `TF_OWNER`.
 
 ## Evidencias
 Ver `docs/evidencias.md`.
 
 ## Versiones pinneadas
-- Dkron: `v3.2.7`
-- PostgreSQL: `15.7`
+- Dkron: `v4.0.9` (OSS — persistencia BoltDB embebida, sin Postgres)
 - node_exporter: `v1.8.2`
 - Prometheus: `v2.54.1`
 - Alertmanager: `v0.27.0`
@@ -6235,22 +6003,22 @@ Estructura (2.000–5.000 palabras), 5 secciones (sección 6.2 del PDF):
 - Justifica Dkron, AWS, y la **Opción B (EC2 + Compose + Ansible)** del PDF para el cómputo de Dkron.
 - Justifica la **arquitectura híbrida**: por qué Dkron va en EC2 pero Prometheus/Grafana van en Fargate.
 - Por cada uno de los **5 bloques que pide el PDF §6.2 A** — **cómputo**, **base de datos**, **cache o cola**, **observabilidad**, **CI/CD** — escribe: qué elegiste, por qué, qué alternativas consideraste, bajo qué condiciones revisarías la decisión.
-  - 💡 Para el bloque **cache/cola** en Caso D: el PDF lo lista como bloque obligatorio del reporte, pero Dkron no necesita un componente asíncrono separado. Aun así escríbelo (no lo omitas): *"No aplica al escenario — Dkron no requiere cache distribuido ni cola de eventos; la cola interna de jobs y el histórico viven en RDS PostgreSQL. Revisaría la decisión si el throughput de jobs supera los 1.000/min sostenidos (cuando la latencia de RDS empezaría a dominar) o si introdujera fan-out a workers paralelos."* Ver explicación completa en L1387.
+  - 💡 Para el bloque **cache/cola** en Caso D: el PDF lo lista como bloque obligatorio del reporte, pero Dkron no necesita un componente asíncrono separado. Aun así escríbelo (no lo omitas): *"No aplica al escenario — Dkron no requiere cache distribuido ni cola de eventos; la cola interna de jobs y el histórico viven en BoltDB embebido sobre el volumen EBS de la propia EC2 (Dkron OSS no soporta backend Postgres — ver PARTE 9.2). Revisaría la decisión si el throughput de jobs supera los 1.000/min sostenidos (cuando BoltDB empezaría a dominar la latencia y tendría sentido migrar a Dkron Pro con Postgres) o si introdujera fan-out a workers paralelos."*
 
 ### B — Conceptos clave (~2-3 páginas, ~½ página por concepto — los **7 obligatorios** del PDF sección 6.2 B)
-1. **IaC vs gestión de configuración** — Terraform vs Ansible. **Aquí tienes ejemplo concreto:** Terraform crea EC2/RDS/IAM/SG/ALB; Ansible instala Docker, copia el compose, hace `docker pull` + restart. La frontera la cruzas en `output ec2_private_ip` (Terraform) → `aws_ec2.yml` (Ansible).
-2. **Containerización vs EC2 + Ansible** — Tu proyecto vivió las DOS cosas. Containers en local (Parte 3) y en producción (la imagen `dkron:v3.2.7` es bit-a-bit la misma). Pero la EC2 sigue necesitando Docker instalado, kernel actualizado, daemon configurado — eso lo hace Ansible. Justifica con datos del proyecto.
+1. **IaC vs gestión de configuración** — Terraform vs Ansible. **Aquí tienes ejemplo concreto:** Terraform crea EC2/IAM/SG/ALB/ECR; Ansible instala Docker, copia el compose, hace `docker pull` + restart. La frontera la cruzas en `output ec2_private_ip` (Terraform) → `aws_ec2.yml` (Ansible).
+2. **Containerización vs EC2 + Ansible** — Tu proyecto vivió las DOS cosas. Containers en local (Parte 3) y en producción (la imagen `dkron:v4.0.9` es bit-a-bit la misma). Pero la EC2 sigue necesitando Docker instalado, kernel actualizado, daemon configurado — eso lo hace Ansible. Justifica con datos del proyecto.
 3. **CI / CD-delivery / CD-deployment** — Implementaste delivery (con aprobación manual antes de `terraform apply` y de `ansible-playbook deploy.yml`). Justifica el nivel elegido.
 4. **SLI / SLO / error budget** — Tus 2 SLOs (disponibilidad ≥99% y tasa de éxito ≥95%), justificación numérica de cada umbral.
 5. **Mínimo privilegio en IAM** — instance profile de EC2 (los managed `SSMManagedInstanceCore`/`CloudWatchAgentServerPolicy` + dos inline acotadas a SSM por ARN), role del runner GHA via OIDC, role de las tasks de Prom/Grafana. Qué permiso tuviste que ampliar y por qué (probablemente s3:* sobre el bucket `ansible-ssm`).
 6. **State remoto y locking en Terraform** — Qué pasa con un `apply` concurrente sin lock (ya lo respondiste en Pregunta 4.3).
-7. **Trade-offs del componente de estado/scheduler introducido por el escenario** — Para Caso D, esto es **Dkron como scheduler distribuido + RDS como almacén persistente**. Qué problema resuelve (programación distribuida y durable) y qué problemas operativos NUEVOS introduce (drift entre hora programada y real, riesgo de ejecución duplicada al reiniciar, dependencia fuerte de la BD, complejidad de migraciones de schema en upgrades). Esta es la pregunta exacta que pide el PDF (sección 6.2 B punto 7).
+7. **Trade-offs del componente de estado/scheduler introducido por el escenario** — Para Caso D, esto es **Dkron como scheduler distribuido + BoltDB embebido en EBS como almacén persistente** (NO RDS — descubrimos en producción que Dkron OSS no soporta Postgres, ver PARTE 5.4 y 11.2). Qué problema resuelve (programación distribuida y durable) y qué problemas operativos NUEVOS introduce: drift entre hora programada y real, riesgo de ejecución duplicada al reiniciar, **acoplamiento del estado al ciclo de vida de la EC2** (si destruyes la EC2 sin snapshot del EBS, pierdes histórico de jobs — mitigado con DLM y procedimiento R1 del runbook), complejidad de migraciones de schema en upgrades. Esta es la pregunta exacta que pide el PDF (sección 6.2 B punto 7).
 
 ### C — Problemas encontrados (~1 página) — entre 3 y 5 problemas REALES
 Por cada uno: síntoma → método de investigación → causa raíz → solución → prevención.
 
 **Aquí van los errores que SI te pasaron** (todos los marcados como 💥 en esta guía). Ejemplos:
-- **Problema:** ALB target unhealthy. **Investigación:** logs de CloudWatch del container. **Causa raíz:** RDS no había terminado de crearse. **Solución:** `depends_on` explícito. **Prevención:** documentar dependencias entre módulos.
+- **Problema:** ALB target unhealthy y el container de Dkron en `Restarting (1)` infinito. **Investigación:** `docker logs dkron` mostró que el binario imprimía el listado de flags y salía con código 1. **Causa raíz:** habíamos puesto `--store=postgres` en el `command` del compose, pero Dkron OSS no soporta backends externos (es feature de Dkron Pro). **Solución:** eliminar `--store=postgres`, añadir `--data-dir=/dkron.data` con bind mount al volumen EBS de la EC2, eliminar el módulo Terraform `storage/` con todo su RDS + SSM + SG. **Prevención:** verificar la matriz de features OSS vs Pro de cualquier componente externo **antes** de diseñar la infra a su alrededor. Detalle completo en PARTE 11.2.
 - **Problema:** Trivy bloqueó CVE en imagen oficial. **Investigación:** revisé el CVE en NVD. **Causa raíz:** versión de Go en la imagen tenía vulnerabilidad sin fix upstream. **Solución:** agregué a `.trivyignore` con justificación. **Prevención:** alarma para revisar `.trivyignore` cada mes.
 
 ### D — Costos (~½ página)
@@ -6262,7 +6030,7 @@ Tabla de costos mensuales (estimado con [AWS Pricing Calculator](https://calcula
 | EBS gp3 (raíz EC2) | 20 GB | $1.60 | $0.30 |
 | ECS Fargate — Prometheus + Alertmanager | 0.25 vCPU + 0.5 GB | $7 | $1.20 (FARGATE_SPOT × 85h) |
 | ECS Fargate — Grafana | 0.25 vCPU + 0.5 GB | $7 | $1.20 |
-| RDS PostgreSQL | db.t3.micro single-AZ | $15 | $0 (free tier) |
+| ~~RDS PostgreSQL~~ | ~~db.t3.micro single-AZ~~ | **eliminado** ($0) | **eliminado** ($0) |
 | ALB | 1 LCU promedio | $20 | $1.70 (85h activo) |
 | NAT | NAT Gateway 24/7 vs NAT Instance t3.nano | $32 | $0.30 (t3.nano × 85h) |
 | EFS (Prometheus + Grafana) | 2 GB | $0.60 | $0.60 |
@@ -6270,10 +6038,12 @@ Tabla de costos mensuales (estimado con [AWS Pricing Calculator](https://calcula
 | S3 (tfstate + ansible-ssm) | <1 GB | $0.05 | $0.05 |
 | Lambda alertmgr-to-sns | <100 invocaciones/mes | $0 (free tier) | $0 |
 | CloudWatch Logs | retención 7d → 1d, ~3 GB | $4 | $1 |
-| **Total** | | **~$102** | **~$6-8** |
+| **Total** | | **~$87** | **~$6-8** |
+
+> 💡 Antes el total 24/7 era ~$102 contando RDS. Al cambiar Dkron a BoltDB embebido (ver PARTE 5.4) se cayó RDS y la cifra bajó a ~$87/mes 24/7.
 
 **Optimizaciones concretas para producción real** (el PDF pide DOS — elige las dos más fundamentales):
-1. **Savings Plan** o Reserved Instances para EC2/Fargate/RDS — ahorro ~30% sobre el costo on-demand.
+1. **Savings Plan** o Reserved Instances para EC2/Fargate — ahorro ~30% sobre el costo on-demand.
 2. **Reemplazar NAT Gateway** por VPC Endpoints (ECR, SSM, CloudWatch Logs) + NAT Instance pequeña para egress puntual. Ahorro ~$28/mes y reduce latencia.
 
 > 💡 Las técnicas de *desarrollo* (free tier, destroy nocturno, FARGATE_SPOT) van en la sección E del reporte como "lo que aplicamos durante el bootcamp", no como producción real. Diferéncialas claramente.
@@ -6297,9 +6067,9 @@ Tabla de costos mensuales (estimado con [AWS Pricing Calculator](https://calcula
 - [ ] Dashboard de Grafana muestra datos (paneles RED + SLOs en verde)
 - [ ] Prometheus tiene `up{job="dkron"} == 1` y reglas en estado `OK`
 - [ ] Alerta llegó al email cuando la provocaste — el flujo Prometheus FIRING → Alertmanager → Lambda → SNS funciona end-to-end (capturada en evidencias)
-- [ ] `docs/runbook.md` tiene 3 procedimientos: R1 (snapshot RDS), R2 (rollback Ansible), R3 (recreación EC2)
+- [ ] `docs/runbook.md` tiene 3 procedimientos: R1 (backup/restore del EBS con BoltDB), R2 (rollback Ansible), R3 (recreación EC2)
 - [ ] `REPORTE.md` está completo (>2.000 palabras), escrito por TI, con frontera Terraform↔Ansible explicada
-- [ ] Todas las imágenes pinneadas (`v3.2.7`, no `latest`)
+- [ ] Todas las imágenes pinneadas (`v4.0.9`, no `latest`)
 - [ ] Versión de `ansible-core` y de las colecciones documentadas en README
 - [ ] No hay secretos en el repo: `git log -p | grep -iE "password|secret|key" | head`
 - [ ] Tags `Project, Environment, Owner, ManagedBy` en TODOS los recursos
@@ -6314,7 +6084,7 @@ Tabla de costos mensuales (estimado con [AWS Pricing Calculator](https://calcula
 **Decide pronto** si lo vas a hacer. Si tu sección C del reporte (problemas reales) quedó floja, el video puede salvarte 2-3 puntos. Si tu reporte es sólido, el video es ganancia marginal.
 
 **Estructura sugerida (PDF 6.5):**
-1. **Recorrido por la arquitectura desplegada** (~2 min) — mostrar el diagrama de `docs/arquitectura.md` y la consola AWS con los recursos creados (VPC, EC2, RDS, ALB, ECR, SSM Parameters, Fargate cluster).
+1. **Recorrido por la arquitectura desplegada** (~2 min) — mostrar el diagrama de `docs/arquitectura.md` y la consola AWS con los recursos creados (VPC, EC2 + su EBS con BoltDB, ALB, ECR, SSM Parameters, Fargate cluster). Si el evaluador pregunta por la BD, explica que no hay RDS — la persistencia es BoltDB local sobre EBS porque Dkron OSS no soporta Postgres (PARTE 9.2).
 2. **Pipeline ejecutándose end-to-end** (~3 min) — abrir un PR en vivo, mostrar las validaciones (fmt, validate, tflint, Checkov, ansible-lint, Trivy), merge a main, aprobar el environment "production", y mostrar Terraform apply + Ansible deploy ejecutándose.
 3. **Dashboard de observabilidad y SLOs definidos** (~2 min) — Grafana abierto, paneles RED, los 2 SLOs en verde, comentar las queries PromQL.
 4. **Generación intencional de violación del SLO + entrega de la alerta** (~2 min) — replicar el procedimiento de 8.6 en vivo, mostrar el email recibido, abrir Logs Insights y correlacionar con el `job_id`.
@@ -6363,8 +6133,8 @@ Tabla de costos mensuales (estimado con [AWS Pricing Calculator](https://calcula
 
 ---
 
-<a id="parte-11"></a>
-# PARTE 11 — Tabla maestra de errores comunes (consolidada)
+<a id="parte-14"></a>
+# PARTE 14 — Tabla maestra de errores comunes (consolidada)
 
 | # | Error | Causa | Solución |
 |---|---|---|---|
@@ -6375,14 +6145,14 @@ Tabla de costos mensuales (estimado con [AWS Pricing Calculator](https://calcula
 | 5 | Reporte "se siente IA" | frases genéricas | Reescribe con anécdotas reales |
 | 6 | Imagen `:latest` | violación regla PDF | Pinea a versión exacta |
 | 7 | Pipeline corre `apply` sin aprobar | sin environment | Settings → Environments → production → reviewers |
-| 8 | RDS expuesto | SG mal | Solo desde SG de la app |
+| 8 | ~~RDS expuesto~~ (N/A — ya no hay RDS, ver PARTE 5.4) | — | — |
 | 9 | "InvalidClientTokenId" | credenciales | `aws configure` |
 | 10 | destroy bloqueado por VPC | ENIs liberándose | Espera 5 min |
 | 11 | Permission denied Docker | usuario fuera de grupo | `usermod -aG docker $USER` |
 | 12 | docker-compose vs docker compose | versiones | Usa plugin v2 |
-| 13 | Postgres 15.x no existe | minor deprecada | Usa la última 15.x disponible (`aws rds describe-db-engine-versions`) |
+| 13 | Dkron OSS imprime el help y muere | usaste `--store=postgres` (solo existe en Pro) | Quita el flag, añade `--data-dir=/dkron.data` + volumen EBS. Ver PARTE 11.2 |
 | 14 | ALB unhealthy tras `terraform apply` | EC2 vacía, falta correr Ansible | `ansible-playbook site.yml` |
-| 15 | Container Dkron reinicia en loop | DSN mal o env file no se rendere | Revisar `/opt/dkron/.env` y `lookup('amazon.aws.aws_ssm', ...)` |
+| 15 | Container Dkron reinicia en loop | flag inválido en el `command` (típicamente `--store=postgres` con OSS) | `docker logs dkron` → si imprime el help, revisa el `command`. Ver PARTE 11.2 |
 | 16 | Tags faltantes | olvido | Usa `default_tags` en provider |
 | 17 | Dos applies concurrentes | sin lock | `use_lockfile = true` |
 | 18 | Trivy bloqueando | CVEs sin fix | `.trivyignore` documentado |
@@ -6390,7 +6160,7 @@ Tabla de costos mensuales (estimado con [AWS Pricing Calculator](https://calcula
 | 19b | Prometheus pierde datos al reiniciar | falta volumen EFS | Mount `/prometheus` desde EFS access point con uid 65534 |
 | 19c | Grafana sin dashboard | provisioning mal montado | Monta YAML en `/etc/grafana/provisioning/dashboards` |
 | 20 | Email SNS no llega | suscripción no confirmada | Click en confirmation email |
-| 21 | "Subnet group requires 2 AZs" | RDS exige 2+ AZ subnets | Crea segunda subnet privada en otra AZ |
+| 21 | ~~"Subnet group requires 2 AZs"~~ (N/A sin RDS) — pero seguimos creando 2 subnets privadas para Fargate multi-AZ | — | — |
 | 22 | Job no se ejecuta | schedule mal escrito | Usa `@every 30s` para test |
 | 23 | Checkov falla por defaults | reglas estrictas | Skip con justificación o ajusta config |
 | 24 | terraform fmt en CI falla | local no formateado | `terraform fmt -recursive` antes de push |
@@ -6399,7 +6169,7 @@ Tabla de costos mensuales (estimado con [AWS Pricing Calculator](https://calcula
 | 27 | Conexión `aws_ssm` falla | falta plugin session-manager o IAM | Instala `session-manager-plugin` y revisa role |
 | 28 | Playbook reporta `changed=N` siempre | `command:` o `shell:` sin `creates`/`changed_when` | Usa módulos nativos o agrega `changed_when: false` |
 | 29 | `community.docker.docker_compose_v2` falla "no module 'docker'" | falta `pip install docker` | Asegura el rol `docker` instala el SDK Python antes |
-| 30 | `wait_for: port=8080` timeout | RDS no listo, .env vacío o image_tag mal | `docker logs dkron --tail 50` desde la EC2 |
+| 30 | `wait_for: port=8080` timeout | container en `Restarting (1)` (típicamente flag inválido — ver #15) o image_tag mal | `docker compose ps` + `docker logs dkron --tail 50` |
 | 31 | ansible-lint bloquea con `name[casing]` | profile production estricto | Usa Start Case en nombres o documenta skip en `.ansible-lint` |
 | 32 | EC2 no aparece en SSM | falta `AmazonSSMManagedInstanceCore` o ruta NAT | Atach policy + verifica route table de la subnet privada |
 | 33 | Bucket `ansible-ssm` no existe | Terraform no lo creó | Recurso `aws_s3_bucket.ansible_ssm` y permisos en instance profile |
@@ -6425,7 +6195,6 @@ terraform destroy
 ```bash
 aws ec2 describe-instances --filters "Name=tag:Project,Values=dkron" --query "Reservations[].Instances[].State.Name"
 aws ecs list-clusters --region us-east-1
-aws rds describe-db-instances --region us-east-1
 aws ec2 describe-vpcs --filters "Name=tag:Project,Values=dkron"
 aws elbv2 describe-load-balancers --query "LoadBalancers[?Tags[?Key=='Project' && Value=='dkron']]"
 
@@ -6467,7 +6236,7 @@ Es lo que ya tienes con `destruir.yaml`, pero formalízalo: un calendario realis
 - **Noche (cuando terminas):** Actions → destruir → escribe `DESTRUIR`. Tarda ~5 min.
 
 **Cuidado con:**
-- **EBS snapshots de RDS:** al destruir, `skip_final_snapshot = true` ya está. No pagas snapshot.
+- **EBS root de la EC2 (contiene el BoltDB de Dkron):** con `delete_on_termination = true` (default en este proyecto), `terraform destroy` borra el volumen. **Si quieres preservar el histórico de Dkron entre sesiones, toma un snapshot del volumen antes del destroy** (ver runbook R1). Para producción real, activa DLM con snapshots diarios.
 - **CloudWatch Logs:** los log groups sobreviven a `terraform destroy` si no los gestiona el módulo. Verifica que `aws_cloudwatch_log_group.dkron` y `compose` estén dentro del state.
 - **Bucket S3 ansible-ssm:** `force_destroy = true` ya está, así que se borra solo.
 - **ECR:** las imágenes sobreviven al destroy si no agregas `force_delete = true`. **No las borres** — el primer `apply` del día siguiente las re-pulea innecesariamente; mejor pagar los $0.10/GB y tener push barato.
@@ -6482,26 +6251,15 @@ variable "instance_type" {
   type    = string
   default = "t3.micro"   # antes t3.small — free tier 750h/mes
 }
-
-variable "db_instance_class" {
-  type    = string
-  default = "db.t3.micro"   # ya estaba — confirmar
-}
-
-variable "db_allocated_storage" {
-  type    = number
-  default = 20   # free tier cubre 20 GB de gp2; gp3 también ~$0
-}
 ```
 
 > ⚠️ **t3.micro tiene 1 vCPU y 1 GB de RAM**. Dkron + node_exporter caben justo. Si ves OOMKilled en Docker (`docker logs dkron`), sube a t3.small. Documenta el OOM en la sección C del reporte.
 
-**RDS free tier checklist (lo que NO debe estar en tu Terraform si quieres free tier):**
-- `multi_az = false` ✓ (ya está)
-- `instance_class = "db.t3.micro"` ✓
-- `allocated_storage <= 20` ✓
-- `storage_type = "gp2"` o `gp3` ✓
-- Sin Performance Insights ni Enhanced Monitoring (a menos que los agregues — ambos cuestan extra)
+**EBS free tier checklist (el volumen root de la EC2 contiene el BoltDB de Dkron):**
+- `volume_size = 20` ✓ (free tier cubre 30 GB de gp3)
+- `volume_type = "gp3"` ✓
+- `encrypted = true` ✓ (no cuesta extra)
+- `delete_on_termination = true` ✓ — pero significa que al destruir EC2 pierdes el histórico de Dkron (mitigación: snapshots EBS, ver runbook R1)
 
 ### Palanca 3 — NAT Gateway → NAT Instance (la diferencia más grande para 24/7)
 
@@ -6646,7 +6404,7 @@ Reemplaza la tabla del reporte por una con las dos columnas:
 | EBS gp3 (raíz EC2) | $1.60 | $0.30 (20 GB × 85h prorrateado) |
 | ECS Fargate — Prometheus | $7 (FARGATE) | $1.20 (FARGATE_SPOT × 85h) |
 | ECS Fargate — Grafana | $7 | $1.20 (combinada o spot) |
-| RDS PostgreSQL | $15 | $0 (free tier × 85h) |
+| ~~RDS PostgreSQL~~ | **eliminado** ($0) | **eliminado** ($0) |
 | ALB | $20 | $1.70 (85h × $0.0225 + LCU mínimo) |
 | NAT | NAT Gateway $32 | NAT Instance t3.nano 85h = **$0.30**, o NAT GW 85h = $3.83 |
 | EFS | $0.60 | $0.60 (siempre prendido pero barato) |
@@ -6654,10 +6412,10 @@ Reemplaza la tabla del reporte por una con las dos columnas:
 | S3 (tfstate + ansible-ssm) | $0.05 | $0.05 |
 | Lambda alertmgr-to-sns | $0 | $0 |
 | CloudWatch Logs (1d) | $4 | $1 |
-| **Total mensual** | **~$102** | **~$6-8** (free tier) o **~$15** (sin free tier) |
+| **Total mensual** | **~$87** | **~$6-8** (free tier) o **~$12** (sin free tier) |
 
 **Para escribir en sección D del reporte:**
-> "El costo 24/7 estimado es ~$102/mes, dominado por NAT Gateway ($32) y ALB ($20). Las dos optimizaciones que aplicaría en producción real (PDF sección 6.2 D) son: (1) reemplazar NAT Gateway por VPC Endpoints para los flujos críticos (ECR, SSM, CloudWatch) más una NAT Instance t3.nano para el resto del egress, ahorrando ~$28/mes; (2) consolidar las 2 tasks de observabilidad en 1 task con 3 containers en `FARGATE_SPOT`, ahorrando ~70% del cómputo de observabilidad. Durante el desarrollo del bootcamp aplicamos también `terraform destroy` nocturno (orquestado en `destruir.yaml`), llevando el costo total del proyecto a <$10."
+> "El costo 24/7 estimado es ~$87/mes (antes ~$102 con RDS; se cayeron ~$15 al eliminar el módulo storage — ver PARTE 5.4), dominado por NAT Gateway ($32) y ALB ($20). Las dos optimizaciones que aplicaría en producción real (PDF sección 6.2 D) son: (1) reemplazar NAT Gateway por VPC Endpoints para los flujos críticos (ECR, SSM, CloudWatch) más una NAT Instance t3.nano para el resto del egress, ahorrando ~$28/mes; (2) consolidar las 2 tasks de observabilidad en 1 task con 3 containers en `FARGATE_SPOT`, ahorrando ~70% del cómputo de observabilidad. Durante el desarrollo del bootcamp aplicamos también `terraform destroy` nocturno (orquestado en `destruir.yaml`), llevando el costo total del proyecto a <$10."
 
 ## ❓ 12.3 ¿Hay algo gratis adicional que ya estoy desperdiciando?
 
@@ -6677,7 +6435,7 @@ Reemplaza la tabla del reporte por una con las dos columnas:
 Antes de hacer `git push` que dispara `apply`:
 
 - [ ] `instance_type = "t3.micro"` (free tier) en `infra/modules/compute/`
-- [ ] `db_instance_class = "db.t3.micro"` y `multi_az = false` (free tier)
+- [ ] EBS root `volume_size = 20` GB gp3 (free tier cubre 30 GB)
 - [ ] `retention_in_days = 1` en todos los `aws_cloudwatch_log_group`
 - [ ] `FARGATE_SPOT` en task de Prometheus (Grafana opcional)
 - [ ] NAT Instance t3.nano si dejas infra prendida >12h/día, o NAT Gateway si destruyes a diario
@@ -6750,7 +6508,7 @@ Antes de hacer `git push` que dispara `apply`:
 
 ### Semana 2 — AWS y Terraform (módulo compute con EC2)
 - [ ] Día 1-2: Parte 4. Crear cuenta, IAM, alertas billing, bucket de tfstate.
-- [ ] Día 3-7: Parte 5. Escribir módulos network y compute (con la **EC2** + ALB + RDS + IAM), primer `apply`. La EC2 queda vacía — eso está bien.
+- [ ] Día 3-7: Parte 5. Escribir módulos network y compute (con la **EC2** + ALB + IAM + ECR), primer `apply`. La EC2 queda vacía — eso está bien. **No hay módulo storage**: la persistencia de Dkron es BoltDB local sobre EBS (ver PARTE 5.4).
 
 ### Semana 3 — Ansible (capa de configuración) ⭐️ semana añadida
 - [ ] Día 1-2: Parte 6.1-6.3. Instalar Ansible, requirements.yml, ansible.cfg, inventario dinámico aws_ec2.
@@ -6827,7 +6585,8 @@ Llena al menos 5 entradas durante el proyecto. Te servirán para la sección C d
 | **Grafana** | UI para dashboards y alertas sobre fuentes como Prometheus y CloudWatch. |
 | **EFS** | Elastic File System. Almacenamiento de archivos compartido y persistente para Fargate. |
 | **Cloud Map** | Service discovery DNS de AWS — resuelve `<svc>.<ns>.local` a IPs internas. |
-| **RDS** | Relational Database Service. BDs managed. |
+| **RDS** | Relational Database Service. BDs managed. (En este proyecto NO se usa — Dkron OSS persiste en BoltDB embebido sobre EBS; ver PARTE 5.4 y 9.2.) |
+| **BoltDB** | Key-value store embebido escrito en Go. Es un archivo único en disco; lo usa Dkron OSS como almacén por defecto cuando arrancas con `--data-dir=<path>`. No requiere proceso aparte ni puertos abiertos. |
 | **SG** | Security Group. Firewall virtual de AWS. |
 | **SLA / SLO / SLI** | Acuerdo / Objetivo / Indicador de nivel de servicio. |
 | **SNS** | Simple Notification Service. Pub/sub para alertas. |
@@ -6875,3 +6634,72 @@ El bootcamp evalúa **comprensión**. Un proyecto con 3 problemas reales documen
 **Equivócate, anota, soluciona, documenta.** Repite. Eso es la guía completa del Caso D.
 
 ¡Buena suerte! 🚀
+
+---
+
+<a id="parte-11"></a>
+# PARTE 11 — Errores reales encontrados en producción (sesión de debug 2026-05-17)
+
+Esta sección documenta tres fallos que aparecieron al ejecutar el playbook por primera vez contra la EC2 ya provisionada. Los dejo aquí porque son específicos del stack **Dkron OSS + AL2023 + community.docker** y no aparecen en la documentación oficial. Si te aparece alguno, no es que hicieras algo mal — es la combinación.
+
+## ❓ 11.1 awscli muere con `ModuleNotFoundError: No module named 'urllib3'`
+
+**Síntoma:** la task `aws ecr get-login-password --region us-east-1` falla con código de retorno 1. Si tienes `no_log: true` en la task no ves el error real — quítalo temporalmente para depurar.
+
+**Causa:** el AWS CLI v1 que viene en AL2023 corre como `/usr/bin/python3 -s ...` (el flag `-s` excluye `/usr/local/lib/python3.9/site-packages/` del path de imports). El paquete `python3-urllib3` está instalado por rpm en `/usr/lib/python3.9/site-packages/urllib3/`, pero si previamente corriste `pip install docker --ignore-installed`, pip sobreescribe/borra archivos del urllib3 del sistema. Resultado: `rpm -q python3-urllib3` dice "instalado" pero `/usr/lib/python3.9/site-packages/urllib3/__init__.py` ya no existe → `ModuleNotFoundError`.
+
+**Fix aplicado (ya está en el playbook):**
+1. Quitar `--ignore-installed` del `extra_args` del módulo `pip` para que no vuelva a romper urllib3.
+2. Añadir una tarea auto-sanadora que verifica con `rpm -V python3-urllib3` y, si detecta archivos faltantes, ejecuta `dnf reinstall -y python3-urllib3`. Está en `roles/docker/tasks/main.yml` justo después del pip install.
+
+**Cómo se ve la tarea:**
+```yaml
+- name: Verificar integridad de python3-urllib3
+  ansible.builtin.command: rpm -V python3-urllib3
+  register: urllib3_verify
+  failed_when: false
+  changed_when: false
+
+- name: Reinstalar python3-urllib3 si está corrupto
+  ansible.builtin.command: dnf reinstall -y python3-urllib3
+  when: urllib3_verify.stdout | length > 0
+```
+
+**Por qué importa para el reporte:** ejemplo concreto de "infra como código resiliente" — el playbook detecta corrupción y se auto-cura sin intervención manual. Buen punto para sección 9.8 (operación) del reporte.
+
+## ❓ 11.2 Dkron container en `Restarting (1)` infinito — imprime el help y muere
+
+**Síntoma:** después de `docker compose up -d`, `docker compose ps` muestra dkron con `Status: Restarting (1) Xs ago`. Los logs (`docker compose logs dkron`) imprimen el listado completo de flags de `dkron agent --help` y exit code 1.
+
+**Causa:** el compose le pasa `--store=postgres` al binario. **Dkron OSS v4.0.9 no soporta backends externos** — los flags `--store`, `--backend`, `--dsn` solo existen en Dkron Pro (la versión comercial). El binario OSS no reconoce `--store`, asume que pasaste un comando inválido, imprime el help y sale.
+
+Verificación: en el host corre `docker run --rm <imagen>:v4.0.9 agent --help | grep -iE 'store|backend|dsn|postgres'` — devuelve vacío. Ninguno de esos flags existe.
+
+**Fix aplicado:**
+1. Quitar `--store=postgres` del `command` del compose.
+2. Añadir `--data-dir=/dkron.data` y montar un volumen `{{ dkron_data_volume }}:/dkron.data` para que BoltDB persista entre `docker compose down/up`.
+3. Eliminar `DKRON_DSN` del `.env` (era una lookup a SSM que ya no se usa).
+4. Eliminar el módulo Terraform `storage/` que aprovisionaba RDS + SSM SecureString del DSN.
+
+**Cómo verificar que está corregido:** `curl http://<alb>/v1/jobs` devuelve `[]` (status 200) — Dkron arrancó, expuso la API, BoltDB inicializado vacío. La task `wait_for` + `uri` de Ansible cubre esto en el playbook.
+
+**Lección de diseño:** verificar la matriz de features OSS vs Pro **antes** de aprovisionar infraestructura. Aquí gastamos RDS + SSM + un módulo Terraform completo en algo que el binario nunca iba a usar.
+
+## ❓ 11.3 Handler `Reiniciar compose` falla con `Unsupported parameters: restarted`
+
+**Síntoma:** al cambiar el template del compose, el handler se dispara y falla con:
+```
+Unsupported parameters for (community.docker.docker_compose_v2) module: restarted.
+```
+
+**Causa:** API incompatible. En `community.docker.docker_compose` (v1, deprecated) se usaba `state: present` + `restarted: true`. En `community.docker.docker_compose_v2` el parámetro `restarted` ya no existe — se usa directamente `state: restarted`.
+
+**Fix:** en `roles/dkron-compose/handlers/main.yml`:
+```yaml
+- name: Reiniciar compose
+  community.docker.docker_compose_v2:
+    project_src: "{{ dkron_dir }}"
+    state: restarted    # antes: state: present + restarted: true
+```
+
+**Por qué importa:** cuando migres de `docker_compose` v1 a v2 (recomendado, soporta Compose v2 nativo), revisa todos los parámetros. La docs oficial lista los soportados: `present`, `absent`, `stopped`, `restarted`.

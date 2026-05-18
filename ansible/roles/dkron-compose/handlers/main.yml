@@ -1,0 +1,5 @@
+---
+- name: Reiniciar compose
+  community.docker.docker_compose_v2:
+    project_src: "{{ dkron_dir }}"
+    state: restarted

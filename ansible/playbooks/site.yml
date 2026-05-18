@@ -1,0 +1,8 @@
+---
+- name: Configurar host de Dkron desde cero
+  hosts: tag_Role_dkron_server
+  gather_facts: true
+  become: true
+  roles:
+    - docker
+    - dkron-compose

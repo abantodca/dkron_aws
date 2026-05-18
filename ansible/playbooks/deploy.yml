@@ -1,0 +1,17 @@
+---
+- name: Deploy de Dkron en EC2 ya configurada
+  hosts: tag_Role_dkron_server
+  gather_facts: false
+  become: true
+  pre_tasks:
+    - name: Validar que docker está instalado
+      ansible.builtin.command: docker version --format '{{ "{{" }}.Server.Version{{ "}}" }}'
+      changed_when: false
+      register: docker_check
+      failed_when: docker_check.rc != 0
+  tasks:
+    - name: Solo tareas con tag deploy/smoke del rol dkron-compose
+      ansible.builtin.include_role:
+        name: dkron-compose
+        tasks_from: main
+      tags: [deploy, smoke]

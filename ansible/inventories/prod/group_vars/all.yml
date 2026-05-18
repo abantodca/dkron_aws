@@ -1,0 +1,20 @@
+---
+project: dkron
+env: prod          # antes "environment" — chocaba con la palabra reservada de Ansible
+region: us-east-1
+
+# Versiones pinneadas (espejo de las que pinnearás en docker-compose)
+dkron_image_tag: "v4.0.9"
+node_exporter_image_tag: "v1.8.2"
+
+# Lookups a SSM (Ansible los resuelve EN TIEMPO DE EJECUCIÓN, no se versionan)
+ecr_repo: "{{ lookup('amazon.aws.aws_ssm', '/dkron/prod/image_repo', region=region) }}"
+
+# Bucket S3 que el conector aws_ssm usa para transferir archivos al EC2.
+# Se resuelve aquí (no en compose:) porque el plugin aws_ec2 no evalúa los
+# lookups dentro de 'compose' y dejaba la variable como None.
+ansible_aws_ssm_bucket_name: "{{ lookup('amazon.aws.aws_ssm', '/dkron/prod/ansible_ssm_bucket', region=region) }}"
+
+# Endpoint del CloudWatch agent
+cw_log_group_compose: "/dkron/ec2/compose"
+cw_log_group_dkron: "/dkron/ec2/dkron"
