@@ -132,8 +132,10 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     environment: production
     outputs:
-      ec2_instance_id: ${{ steps.tf.outputs.ec2_instance_id }}
-      alb_dns_name:    ${{ steps.tf.outputs.alb_dns_name }}
+      ec2_instance_id:     ${{ steps.tf.outputs.ec2_instance_id }}
+      alb_dns_name:        ${{ steps.tf.outputs.alb_dns_name }}
+      grafana_url:         ${{ steps.tf.outputs.grafana_url }}
+      lambda_function_url: ${{ steps.tf.outputs.lambda_function_url }}
     steps:
       - uses: actions/checkout@v4
       - uses: aws-actions/configure-aws-credentials@v4
@@ -155,8 +157,10 @@ jobs:
           TF_VAR_grafana_admin_password: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
         run: |
           terraform apply -auto-approve
-          echo "ec2_instance_id=$(terraform output -raw ec2_instance_id)" >> $GITHUB_OUTPUT
-          echo "alb_dns_name=$(terraform output -raw alb_dns_name)"       >> $GITHUB_OUTPUT
+          echo "ec2_instance_id=$(terraform output -raw ec2_instance_id)"         >> $GITHUB_OUTPUT
+          echo "alb_dns_name=$(terraform output -raw alb_dns_name)"               >> $GITHUB_OUTPUT
+          echo "grafana_url=$(terraform output -raw grafana_url)"                 >> $GITHUB_OUTPUT
+          echo "lambda_function_url=$(terraform output -raw lambda_function_url)" >> $GITHUB_OUTPUT
 
   ansible-deploy:
     runs-on: ubuntu-latest
@@ -204,3 +208,22 @@ jobs:
           done
           echo "ALB nunca devolvió 200 tras 200s"
           exit 1
+      - name: Publicar URLs accesibles
+        if: success()
+        env:
+          ALB:    ${{ needs.apply.outputs.alb_dns_name }}
+          GRAF:   ${{ needs.apply.outputs.grafana_url }}
+          LAMBDA: ${{ needs.apply.outputs.lambda_function_url }}
+        run: |
+          {
+            echo "## URLs del despliegue"
+            echo ""
+            echo "| Servicio | URL |"
+            echo "|---|---|"
+            echo "| Dkron UI | http://$ALB/ |"
+            echo "| Dkron API (jobs) | http://$ALB/v1/jobs |"
+            echo "| Grafana | $GRAF |"
+            echo "| Alertmanager → SNS (Lambda URL) | $LAMBDA |"
+            echo ""
+            echo "**Login Grafana:** usuario \`admin\`, password = secret \`GRAFANA_ADMIN_PASSWORD\` del repo."
+          } | tee -a "$GITHUB_STEP_SUMMARY"
