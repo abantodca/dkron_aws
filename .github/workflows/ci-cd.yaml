@@ -192,7 +192,7 @@ jobs:
       - name: Deploy con ansible-playbook
         working-directory: ansible
         run: |
-          ansible-playbook playbooks/deploy.yml \
+          ansible-playbook playbooks/site.yml \
             --extra-vars "dkron_image_tag=4.1.1"
       - name: Smoke test desde el ALB
         run: |
