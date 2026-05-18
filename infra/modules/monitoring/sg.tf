@@ -61,3 +61,16 @@ resource "aws_security_group_rule" "app_from_prom_9100" {
   security_group_id        = var.app_security_group_id
   source_security_group_id = aws_security_group.prometheus.id
 }
+
+# Grafana consulta Prometheus vía Cloud Map (prometheus.${project}.local:9090).
+# El SG-prom no tiene ingress propio (solo egress); añadimos la regla cross-SG
+# aquí para no acoplar la definición del SG con quién lo consume.
+resource "aws_security_group_rule" "prom_from_graf_9090" {
+  type                     = "ingress"
+  description              = "Grafana queries Prometheus"
+  from_port                = 9090
+  to_port                  = 9090
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.prometheus.id
+  source_security_group_id = aws_security_group.grafana.id
+}
