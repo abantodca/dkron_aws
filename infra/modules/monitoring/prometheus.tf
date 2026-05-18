@@ -26,6 +26,8 @@ resource "aws_ecs_task_definition" "prometheus" {
       name      = "config-init"
       image     = "amazon/aws-cli:2.15.0"
       essential = false
+      # Override ENTRYPOINT=["aws"] del Dockerfile para poder ejecutar sh.
+      entryPoint = []
       command = ["sh", "-c", <<-EOT
         set -e
         mkdir -p /etc/prometheus/targets /etc/alertmanager
