@@ -4,7 +4,7 @@ env: prod          # antes "environment" — chocaba con la palabra reservada de
 region: us-east-1
 
 # Versiones pinneadas (espejo de las que pinnearás en docker-compose)
-dkron_image_tag: "4.0.9"
+dkron_image_tag: "4.1.1"
 node_exporter_image_tag: "v1.8.2"
 
 # Lookups a SSM (Ansible los resuelve EN TIEMPO DE EJECUCIÓN, no se versionan)

@@ -32,7 +32,7 @@ variable "azs" {
 # tflint-ignore: terraform_unused_declarations
 variable "dkron_image_tag" {
   type        = string
-  default     = "4.0.9"
+  default     = "4.1.1"
   description = "Tag de la imagen Dkron a usar (pinneada, NUNCA :latest). Lo consume Ansible vía --extra-vars; Terraform lo declara para que aparezca en terraform.tfvars como única fuente de verdad del proyecto."
 }
 

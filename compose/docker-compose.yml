@@ -1,6 +1,6 @@
 services:
   dkron:
-    image: dkron/dkron:4.0.9
+    image: dkron/dkron:4.1.1
     container_name: dkron-server
     command:
       - agent
